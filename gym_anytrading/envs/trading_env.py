@@ -29,7 +29,7 @@ class TradingEnv(gym.Env):
         self.seed()
         self.df = df
         self.window_size = window_size
-        self.prices, self.signal_features = self._process_data()
+        self.prices, self.hl, self.signal_features = self._process_data()
         self.shape = (window_size, self.signal_features.shape[1])
 
         # spaces
@@ -45,8 +45,11 @@ class TradingEnv(gym.Env):
         self._position = None
         self._position_history = None
         self._total_reward = None
+        self._current_profit = None
         self._total_profit = None
+        self._max_possible_profit = None
         self._first_rendering = None
+        
         self.history = None
 
 
@@ -62,7 +65,9 @@ class TradingEnv(gym.Env):
         self._position = Positions.Short
         self._position_history = (self.window_size * [None]) + [self._position]
         self._total_reward = 0.
-        self._total_profit = 1.  # unit
+        self._current_profit = 0
+        self._total_profit = 100
+        self._max_possible_profit = self.max_possible_profit()
         self._first_rendering = True
         self.history = {}
         return self._get_observation()
@@ -77,9 +82,10 @@ class TradingEnv(gym.Env):
 
         step_reward = self._calculate_reward(action)
         self._total_reward += step_reward
-
-        self._update_profit(action)
-
+        
+        profit = self.calculate_profit(action)
+        self._total_profit += profit
+            
         trade = False
         if ((action == Actions.Buy.value and self._position == Positions.Short) or
             (action == Actions.Sell.value and self._position == Positions.Long)):
@@ -88,7 +94,7 @@ class TradingEnv(gym.Env):
         if trade:
             self._position = self._position.opposite()
             self._last_trade_tick = self._current_tick
-
+            
         self._position_history.append(self._position)
         observation = self._get_observation()
         info = dict(
@@ -158,7 +164,8 @@ class TradingEnv(gym.Env):
 
         plt.suptitle(
             "Total Reward: %.6f" % self._total_reward + ' ~ ' +
-            "Total Profit: %.6f" % self._total_profit
+            "Total Profit: %.6f" % self._total_profit + ' ~ ' +
+            "Max possible profit: %.6f" % self._max_possible_profit
         )
         
         
@@ -182,7 +189,7 @@ class TradingEnv(gym.Env):
         raise NotImplementedError
 
 
-    def _update_profit(self, action):
+    def calculate_profit(self, action):
         raise NotImplementedError
 
 
