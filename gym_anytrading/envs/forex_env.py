@@ -48,7 +48,7 @@ class ForexEnv(TradingEnv):
         if trade:
             current_price = self.prices[self._current_tick]
             last_trade_price = self.prices[self._last_trade_tick]
-            price_return = (current_price - last_trade_price) / last_trade_price
+            price_return = current_price - last_trade_price
             
             if self._position == Positions.Short:
                 step_reward += -price_return * 10000

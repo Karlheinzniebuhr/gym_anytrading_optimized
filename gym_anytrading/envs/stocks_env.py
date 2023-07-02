@@ -48,12 +48,12 @@ class StocksEnv(TradingEnv):
             current_price = self.prices[self._current_tick]
             last_trade_price = self.prices[self._last_trade_tick]
             # calculate the return as the percentage change in price
-            price_return = (current_price - last_trade_price) / last_trade_price
+            price_reward = current_price - last_trade_price
 
             if self._position == Positions.Short:
-                step_reward += -price_return
+                step_reward += -price_reward
             elif self._position == Positions.Long:
-                step_reward += price_return
+                step_reward += price_reward
 
         return step_reward
 
