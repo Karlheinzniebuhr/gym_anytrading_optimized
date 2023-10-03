@@ -5,14 +5,17 @@ import numpy as np
 from enum import Enum
 import matplotlib.pyplot as plt
 
+
 class Actions(Enum):
     Sell = 0
     Buy = 1
+    Skip = 2
 
 
 class Positions(Enum):
     Short = 0
     Long = 1
+    NoPosition = 2
 
     def opposite(self):
         return Positions.Short if self == Positions.Long else Positions.Long
@@ -32,26 +35,6 @@ class TradingEnv(gym.Env):
 
         # spaces
         self.action_space = spaces.Discrete(len(Actions))
-        
-        # self.take_profit_distances = [1, 1.5, 2]  # list of possible tp distances
-        # self.stop_loss_distances = [1, 1.5]  # list of possible sl distances
-        # self.action_space = spaces.MultiDiscrete((
-        #     len(Actions),
-        #     len(self.take_profit_distances),
-        #     len(self.stop_loss_distances)
-        # )) # tuple of discrete action spaces for buy/sell and tp/sl
-        
-        # change the take profit and stop loss distances to continuous spaces
-        # self.take_profit_min = 0.5 # minimum tp distance
-        # self.take_profit_max = 4 # maximum tp distance
-        # self.stop_loss_min = 0.5 # minimum sl distance
-        # self.stop_loss_max = 2 # maximum sl distance
-        # self.action_space = spaces.MultiDiscrete((
-        #     len(Actions),
-        #     spaces.Box(low=self.take_profit_min, high=self.take_profit_max, shape=(1,), dtype=np.float64), # continuous space for tp distance
-        #     spaces.Box(low=self.stop_loss_min, high=self.stop_loss_max, shape=(1,), dtype=np.float64) # continuous space for sl distance
-        #  )) # tuple of discrete and continuous action spaces for buy/sell and tp/sl
-        
         self.shape = (window_size, self.signal_features.shape[1])
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=self.shape, dtype=np.float32)
 
@@ -62,12 +45,11 @@ class TradingEnv(gym.Env):
         self.truncated = False
         self.current_tick = self.start_tick
         self.last_trade_tick = self.current_tick - 1
-        self.position = Positions.Short
+        self.position = Positions.NoPosition
         self.position_history = (self.window_size * [None]) + [self.position]
         self.total_reward = 0.
-        self.total_profit = 1.
+        self.total_profit = 1000.
         self.first_rendering = True
-        
         self.history = None
 
 
@@ -82,23 +64,16 @@ class TradingEnv(gym.Env):
         self.truncated = False
         self.current_tick = self.start_tick
         self.last_trade_tick = self.current_tick - 1
-        self.position = Positions.Short
+        self.position = Positions.NoPosition
         self.position_history = (self.window_size * [None]) + [self.position]
         self.total_reward = 0.
-        self.total_profit = 1.
+        self.total_profit = 1000.
         self.first_rendering = True
         self.history = {}
-        
-        # generate new noisy observations
-        self.prices, self.hl, self.signal_features = self.process_data()
-        
         return self.get_observation(), self.history
 
 
     def step(self, action):
-        # buy_sell_action, tp_distance, sl_distance = action
-        # tp_distance = self.take_profit_distances[tp_distance]
-        # sl_distance = self.stop_loss_distances[sl_distance]
         
         self.done = False
         self.truncated = False
@@ -108,20 +83,22 @@ class TradingEnv(gym.Env):
             self.done = True
 
         step_reward = self.calculate_reward(action)
-        
         self.total_reward += step_reward
         
         profit = self.calculate_profit(action)
         self.total_profit += profit
-            
-        trade = False
-        if ((action == Actions.Buy.value and self.position == Positions.Short) or
-            (action == Actions.Sell.value and self.position == Positions.Long)):
-            trade = True
 
-        if trade:
-            self.position = self.position.opposite()
-            self.last_trade_tick = self.current_tick
+        # if trade was made, update position
+        if(action == Actions.Buy.value):
+            self.position = Positions.Long
+        elif(action == Actions.Sell.value):
+            self.position = Positions.Short
+            
+        # if action was skip, no position is taken
+        elif(action == Actions.Skip.value):
+            self.position = Positions.NoPosition
+        
+        self.last_trade_tick = self.current_tick
             
         self.position_history.append(self.position)
         observation = self.get_observation()

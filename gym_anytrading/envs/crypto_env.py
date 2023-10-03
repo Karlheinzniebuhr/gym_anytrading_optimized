@@ -1,89 +1,174 @@
 import numpy as np
 
+from .noise import NoiseGenerator
 from .trading_env import TradingEnv, Actions, Positions
 from sklearn.preprocessing import MinMaxScaler
 
 
 class CryptoEnv(TradingEnv):
 
-    def __init__(self, df, window_size, frame_bound):
+    def __init__(self, df, window_size, frame_bound, training=False):
         assert len(frame_bound) == 2
 
         self.frame_bound = frame_bound
-        self.scaler = MinMaxScaler(feature_range=(-1, 1))
         self.trade_fee_percent = 0.04 / 100
         self.stop_loss = 1/100
-        self.take_profit = 1.8/100
+        self.take_profit = 2/100
         self.order_size = 100
+        
+        # default noise function for rewards
+        self.noise_function = NoiseGenerator().random_normal_scale_reward
+        # uncomment this to not use any noise
+        # self.noise_function = lambda x: x
+
+        # default reward function that gets called from TradingEnv
+        self.calculate_reward = self.reward_sim
+        
+        if(training):
+            self.process_data = self.ornstein_uhlenbeck_noise
+        else:
+            self.process_data = self.process_data
         
         super().__init__(df, window_size)
 
-    ########################################################
-    # Noise from https://arxiv.org/pdf/2305.02882.pdf
-    # Noise ranking: https://docs.google.com/spreadsheets/d/1CTZiRX_s9RQ3sHVq6WEmWh0SonE5xDEEyDRgmVrLWEs/edit?pli=1#gid=220110982 
-    ########################################################
-    
-    def random_uniform_scale_reward(self, step_reward):
-        # Apply random uniform scale to the reward
-        noise_rate = 0.01 # Probability of applying noise
-        low = 0.9 # Lower boundary of the noise distribution
-        high = 1.1 # Upper boundary of the noise distribution
-        if np.random.rand() <= noise_rate:
-            step_reward *= np.random.uniform(low, high)
-        return step_reward
-    
-    
-    # This function wasn't in the paper
-    def random_normal_scale_reward(self, step_reward):
-        # Apply random normal scale to the reward
-        noise_rate = 1
-        mean = 1
-        std = 0.5
-        if np.random.rand() <= noise_rate:
-            step_reward *= np.random.normal(mean, std)
-        return step_reward
 
 
-    def random_normal_noise_reward(self, step_reward):
-        # Apply random normal noise to the reward
-        noise_rate = 1 # Probability of applying noise
-        mean = 0 # Mean of the noise distribution
-        std = 1.0 # Standard deviation of the noise distribution
-        if np.random.rand() <= noise_rate:
-            step_reward += np.random.normal(mean, std)
-        return step_reward
+    # Ornstein-Uhlenbeck noise v2
+    def ornstein_uhlenbeck_noise(self):
+        start = self.frame_bound[0] - self.window_size
+        end = self.frame_bound[1]
+        df = self.df.iloc[start:end, :].copy()
 
+        # Calculate the noise parameter for each row (absolute difference between high and low)
+        df['noise_param'] = np.abs(df['High'] - df['Low']) + 1
 
-    def random_uniform_noise_reward(self, step_reward):
-        # Apply random uniform noise to the reward
-        noise_rate = 1 # Probability of applying noise
-        low = -0.001 # Lower boundary of the noise distribution
-        high = 0.001 # Upper boundary of the noise distribution
-        if np.random.rand() <= noise_rate:
-            step_reward += np.random.uniform(low, high)
-        return step_reward
+        # Set theta and dt based on the noise parameter
+        theta = 0.005
+        df['dt'] = 0.01 / df['noise_param']
+
+        # Generate a single random percentage between -50% and +50%
+        noise_percentage = np.random.uniform(-0.5, 10)
+
+        # Apply the noise to all rows in the DataFrame using broadcasting
+        columns_to_scale = ['Open', 'High', 'Low', 'Close', 'Volume']
+
+        # Create a noise array of the same shape as the DataFrame
+        noise = np.full(df[columns_to_scale].shape, 1 + noise_percentage)
+
+        # Apply the noise to the DataFrame
+        df[columns_to_scale] *= noise
+
+        # Decrease the scaling factor for less impactful noise
+        scaling_factor = 0.001
+
+        # Initialize a single noise term for each row
+        noise_per_row = np.zeros(df.shape[0])
+        # Vectorized calculation of noise_per_row
+        mu_values = df['noise_param'].values
+        dt_values = df['dt'].values
+        noise_per_row[1:] = np.cumsum(
+            theta * (mu_values[1:] - noise_per_row[:-1]) * dt_values[1:] +
+            np.sqrt(dt_values[1:]) * np.random.normal(size=df.shape[0] - 1)
+        )
+
+        # Vectorized operation to add noise to df_noisy_ou
+        df[['Open', 'High', 'Low', 'Close']] += scaling_factor * noise_per_row[:, np.newaxis]
+
+        # Continue with the rest of your data processing steps
+        signal_features = df[['Open', 'High', 'Low', 'Close']].values
+        hl = df[['High', 'Low']].reset_index()
+
+        prices = df['Close'].to_numpy()
+        diff_prices = np.insert(np.diff(prices), 0, 0)
+        signal_features = np.column_stack((signal_features, diff_prices))
+
+        return prices, hl, signal_features
     
+    
+    
+    # Normal noise
+    def normal_noise(self):
+        start = self.frame_bound[0] - self.window_size
+        end = self.frame_bound[1]
+        df = self.df.iloc[start:end, :]
+
+        # Define parameters for normal noise
+        noise_mean = 1  # The mean of the normal distribution
+        noise_std = 0.01  # The standard deviation of the normal distribution
+
+        # Generate normal noise with the given standard deviation
+        noise_open = np.random.normal(noise_mean, noise_std, size=df.shape[0])
+        noise_high = np.random.normal(noise_mean, noise_std, size=df.shape[0])
+        noise_low = np.random.normal(noise_mean, noise_std, size=df.shape[0])
+        noise_close = np.random.normal(noise_mean, noise_std, size=df.shape[0])
+
+        # Create a new DataFrame df_noisy to store noisy data
+        df_noisy = df.copy()
+
+        # Apply normal noise to each column of df_noisy
+        df_noisy['Open'] *= noise_open
+        df_noisy['High'] *= noise_high
+        df_noisy['Low'] *= noise_low
+        df_noisy['Close'] *= noise_close
+
+        # Scale signal features
+        signal_features = df_noisy[['Open', 'High', 'Low', 'Close']].values
+
+        hl = df_noisy[['High', 'Low']].reset_index()
+
+        # Calculate the differences in prices
+        prices = df_noisy['Close'].to_numpy()  # Extract Close prices
+        diff_prices = np.insert(np.diff(prices), 0, 0)
+
+        # Add the differences in prices to the signal features
+        signal_features = np.column_stack((signal_features, diff_prices))
+
+        return prices, hl, signal_features
+
+
 
     def process_data(self):
         start = self.frame_bound[0] - self.window_size
         end = self.frame_bound[1]
         df = self.df.iloc[start:end, :]
 
-        # Get prices and scale signal features
-        prices = df['Close'].to_numpy()
-        hl = df[['High', 'Low']].reset_index()
+        # scale signal features
         signal_features = df[['Open', 'High', 'Low', 'Close']].values
-        signal_features = self.scaler.fit_transform(signal_features)
 
-        # Compute differences and add to signal features
-        diff = np.diff(prices)
-        diff = np.insert(diff, 0, 0)
-        signal_features = np.column_stack((signal_features, diff))
+        hl = df[['High', 'Low']].reset_index()
+        
+        prices = df['Close'].to_numpy()
+        diff_prices = np.insert(np.diff(prices), 0, 0)
+        
+        signal_features = np.column_stack((signal_features, diff_prices))
 
         return prices, hl, signal_features
 
 
-    def calculate_reward(self, action):
+
+    def log_reward(self, action):
+        step_reward = 0
+
+        trade = False
+        if ((action == Actions.Buy.value and self.position == Positions.Short) or
+            (action == Actions.Sell.value and self.position == Positions.Long)):
+            trade = True
+
+        if trade:
+            current_price = self.prices[self.current_tick]
+            last_trade_price = self.prices[self.last_trade_tick]
+            price_diff = current_price - last_trade_price
+
+            if self.position == Positions.Short:
+                step_reward += -np.log(1 + abs(price_diff))
+            elif self.position == Positions.Long:
+                step_reward += np.log(1 + abs(price_diff))
+
+        return self.noise_function(step_reward)
+
+
+
+    def simple_reward(self, action):
         step_reward = 0
 
         trade = False
@@ -101,32 +186,11 @@ class CryptoEnv(TradingEnv):
             elif self.position == Positions.Long:
                 step_reward += price_diff
 
-        return self.random_normal_scale_reward(step_reward)
+        return self.noise_function(step_reward)
 
 
-    def calculate_return(self, action):
-        step_reward = 0
 
-        trade = False
-        if ((action == Actions.Buy.value and self.position == Positions.Short) or
-            (action == Actions.Sell.value and self.position == Positions.Long)):
-            trade = True
-
-        if trade:
-            current_price = self.prices[self.current_tick]
-            last_trade_price = self.prices[self.last_trade_tick]
-            price_diff = current_price - last_trade_price
-            price_return = price_diff / last_trade_price
-
-            if self.position == Positions.Short:
-                step_reward += -price_return
-            elif self.position == Positions.Long:
-                step_reward += price_return
-
-        return self.random_normal_scale_reward(step_reward)
-
-
-    def calculate_reward_hl(self, action):
+    def reward_hl(self, action):
         step_reward = 0
         
         trade = False
@@ -151,40 +215,12 @@ class CryptoEnv(TradingEnv):
                 else:
                     step_reward += abs(open_price - high)
 
-        return self.random_normal_scale_reward(step_reward)
-    
-    
-    def calculate_return_hl(self, action):
-        step_reward = 0
-        
-        trade = False
-        if ((action == Actions.Buy.value and self.position == Positions.Short) or
-            (action == Actions.Sell.value and self.position == Positions.Long)):
-            trade = True
+            # step_reward = step_reward / open_price
+        return self.noise_function(step_reward)
 
-        if trade:
-            open_price = self.prices[self.last_trade_tick]
-            close_price = self.prices[self.current_tick]
-            low = self.hl['Low'][self.current_tick]
-            high = self.hl['High'][self.current_tick]
-            
-            if self.position == Positions.Short:
-                if open_price < close_price:
-                    step_reward -= abs(open_price - high)
-                else:
-                    step_reward += abs(open_price - low)
-            elif self.position == Positions.Long:
-                if open_price > close_price:
-                    step_reward -= abs(open_price - low)
-                else:
-                    step_reward += abs(open_price - high)
 
-            step_reward = step_reward / open_price
 
-        return self.random_normal_scale_reward(step_reward)
-    
-    
-    def calculate_reward_hl_delta(self, action):
+    def reward_hl_delta(self, action):
         step_reward = 0
 
         # Check if the action is a trade
@@ -208,38 +244,12 @@ class CryptoEnv(TradingEnv):
             elif self.position == Positions.Long:
                 step_reward = high_delta - low_delta
 
-        return self.random_normal_scale_reward(step_reward)
-
-    
-    def calculate_return_hl_delta(self, action):
-        step_reward = 0
-
-        # Check if the action is a trade
-        trade = ((action == Actions.Buy.value and self.position == Positions.Short) or
-                (action == Actions.Sell.value and self.position == Positions.Long))
-
-        if trade:
-            # Get the prices of the current and previous ticks
-            open_price = self.prices[self.last_trade_tick]
-            close_price = self.prices[self.current_tick]
-            low = self.hl['Low'][self.current_tick]
-            high = self.hl['High'][self.current_tick]
-
-            # Calculate the difference between the open price and the high or low price
-            high_delta = abs(open_price - high)
-            low_delta = abs(open_price - low)
-
-            # Reward or penalize based on the position and the price difference
-            if self.position == Positions.Short:
-                step_reward = low_delta - high_delta
-            elif self.position == Positions.Long:
-                step_reward = high_delta - low_delta
-
-            step_reward = step_reward / open_price
-        return self.random_normal_scale_reward(step_reward)
+            # step_reward = step_reward / open_price
+        return self.noise_function(step_reward)
 
 
-    def calculate_reward_sim(self, action):
+
+    def reward_sim(self, action):
         trade = False
         pnl = 0
         
@@ -263,7 +273,7 @@ class CryptoEnv(TradingEnv):
             # calculate the probability of each outcome based on the TP/SL distance. Example if TP is 0.5% and SL is 0.1% then the probability of TP being hit is 0.833 and SL being hit is 0.167
             tp_prob = self.stop_loss / (self.take_profit + self.stop_loss)
             sl_prob = self.take_profit / (self.take_profit + self.stop_loss)
-            coinflip = np.random.choice(np.arange(0, 2), p=[tp_prob, sl_prob])
+            coinflip = np.random.choice([0,1], p=[tp_prob, sl_prob])
             
             if self.position == Positions.Short:
                 
@@ -328,7 +338,8 @@ class CryptoEnv(TradingEnv):
             # calculate the return
             pnl = pnl / order_size
         
-        return self.random_normal_scale_reward(pnl)
+        return self.noise_function(pnl)
+
 
 
     def calculate_profit(self, action):
@@ -348,7 +359,7 @@ class CryptoEnv(TradingEnv):
         # calculate the probability of each outcome based on the TP/SL distance. Example if TP is 0.5% and SL is 0.1% then the probability of TP being hit is 0.833 and SL being hit is 0.167
         tp_prob = self.stop_loss / (self.take_profit + self.stop_loss)
         sl_prob = self.take_profit / (self.take_profit + self.stop_loss)
-        coinflip = np.random.choice(np.arange(0, 2), p=[tp_prob, sl_prob])
+        coinflip = np.random.choice([0,1], p=[tp_prob, sl_prob])
             
         trade = False
         

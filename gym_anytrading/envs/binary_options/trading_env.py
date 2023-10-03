@@ -5,17 +5,17 @@ import numpy as np
 from enum import Enum
 import matplotlib.pyplot as plt
 
+
 class Actions(Enum):
-    Sell = 0
-    Buy = 1
+    Skip = 0
+    Sell = 1
+    Buy = 2
 
 
 class Positions(Enum):
-    Short = 0
-    Long = 1
-
-    def opposite(self):
-        return Positions.Short if self == Positions.Long else Positions.Long
+    NoPosition = 1
+    Short = 1
+    Long = 2
 
 
 class TradingEnv(gym.Env):
@@ -31,16 +31,17 @@ class TradingEnv(gym.Env):
         self.prices, self.hl, self.signal_features = self.process_data()
 
         # spaces
+        # create a discrete action space
         self.action_space = spaces.Discrete(len(Actions))
         
-        # self.take_profit_distances = [1, 1.5, 2]  # list of possible tp distances
-        # self.stop_loss_distances = [1, 1.5]  # list of possible sl distances
+        # self.action_space = spaces.Discrete(len(Actions))
+        # self.bet_sizes = [0.05, 0.1, 0.2]
+        # create multi discrete action space
         # self.action_space = spaces.MultiDiscrete((
         #     len(Actions),
-        #     len(self.take_profit_distances),
-        #     len(self.stop_loss_distances)
-        # )) # tuple of discrete action spaces for buy/sell and tp/sl
-        
+        #     len(self.bet_sizes)
+        # ))
+
         # change the take profit and stop loss distances to continuous spaces
         # self.take_profit_min = 0.5 # minimum tp distance
         # self.take_profit_max = 4 # maximum tp distance
@@ -96,10 +97,9 @@ class TradingEnv(gym.Env):
 
 
     def step(self, action):
-        # buy_sell_action, tp_distance, sl_distance = action
-        # tp_distance = self.take_profit_distances[tp_distance]
-        # sl_distance = self.stop_loss_distances[sl_distance]
-        
+        # action, bet_size_index = action
+        # bet_size = self.bet_sizes[bet_size_index]
+               
         self.done = False
         self.truncated = False
         self.current_tick += 1
@@ -114,14 +114,16 @@ class TradingEnv(gym.Env):
         profit = self.calculate_profit(action)
         self.total_profit += profit
             
-        trade = False
-        if ((action == Actions.Buy.value and self.position == Positions.Short) or
-            (action == Actions.Sell.value and self.position == Positions.Long)):
-            trade = True
+        # if action == Actions.Buy.value, set position to Long
+        if(action == Actions.Buy.value):
+            self.position = Positions.Long
+        # if action == Actions.Sell.value, set position to Short
+        elif(action == Actions.Sell.value):
+            self.position = Positions.Short
+        # if action == Actions.Skip.value, set position to NoPosition
+        else:
+            self.position = Positions.NoPosition
 
-        if trade:
-            self.position = self.position.opposite()
-            self.last_trade_tick = self.current_tick
             
         self.position_history.append(self.position)
         observation = self.get_observation()
