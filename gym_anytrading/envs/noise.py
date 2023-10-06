@@ -9,7 +9,7 @@ class NoiseGenerator:
     
     @classmethod
     def random_uniform_scale_reward(cls, step_reward):
-        noise_rate = 0.01
+        noise_rate = 1
         low = 0.9
         high = 1.1
         if np.random.rand() <= noise_rate:
@@ -21,7 +21,7 @@ class NoiseGenerator:
     def random_normal_scale_reward(cls, step_reward):
         noise_rate = 1
         mean = 1
-        std = 1
+        std = 0.1
         if np.random.rand() <= noise_rate:
             step_reward *= np.random.normal(mean, std)
         return step_reward

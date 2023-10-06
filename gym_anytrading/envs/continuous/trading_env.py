@@ -48,7 +48,7 @@ class TradingEnv(gym.Env):
         self.position = Positions.NoPosition
         self.position_history = (self.window_size * [None]) + [self.position]
         self.total_reward = 0.
-        self.total_profit = 1000.
+        self.total_profit = 10000.
         self.first_rendering = True
         self.history = None
 
@@ -98,6 +98,7 @@ class TradingEnv(gym.Env):
         elif(action == Actions.Skip.value):
             self.position = Positions.NoPosition
         
+        # update the last trade tick
         self.last_trade_tick = self.current_tick
             
         self.position_history.append(self.position)
