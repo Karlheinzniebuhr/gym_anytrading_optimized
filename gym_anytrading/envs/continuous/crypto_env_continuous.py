@@ -27,6 +27,8 @@ class CryptoEnvContinuous(TradingEnv):
         # Current Trade Variables Reward
         self.r_trade_signal = False
         self.r_close_trade_signal = False
+        self.r_long = False
+        self.r_short = False
         self.r_current_trade_long = False
         self.r_current_trade_short = False
         self.r_active_trade = False
@@ -49,6 +51,8 @@ class CryptoEnvContinuous(TradingEnv):
         # Current Trade Variables Profit
         self.trade_signal = False
         self.close_trade_signal = False
+        self.long = False
+        self.short = False
         self.current_trade_long = False
         self.current_trade_short = False
         self.active_trade = False
@@ -201,45 +205,52 @@ class CryptoEnvContinuous(TradingEnv):
 
         # discourage too much skipping, (fine-tune this hyperparameter)
         if((action == Actions.Skip.value) and (self.r_active_trade == False)):
-            return self.noise_function(-0.001)
+            return self.noise_function(-0.01)
         
         self.r_index += 1
-        self.current_open = self.prices[self.last_trade_tick]
-        self.current_low = self.hl['Low'][self.current_tick]
-        self.current_high = self.hl['High'][self.current_tick]
-        self.current_close = self.prices[self.current_tick]
-        
-        
+        current_open = self.prices[self.last_trade_tick]
+        current_low = self.hl['Low'][self.current_tick]
+        current_high = self.hl['High'][self.current_tick]
+        current_close = self.prices[self.current_tick]
+
+
         # ############################################################################
         # Signals creation block
         # ############################################################################
             
-        self.long = True if (action == Actions.Buy.value) else False
-        self.short = True if (action == Actions.Sell.value) else False
-        self.r_trade_signal = (self.long or self.short) and (self.r_active_trade == False)
-        
+        self.r_long = True if (action == Actions.Buy.value) else False
+        self.r_short = True if (action == Actions.Sell.value) else False
+        self.r_trade_signal = (self.r_long or self.r_short) and (self.r_active_trade == False)
+
 
         # ########################################################
         # If conditions are OK, open trade and set open variables.
         # ########################################################
         
         if(self.r_trade_signal == True):
-            self.r_open = self.current_open
+            self.r_open = current_open
             self.r_active_trade = True
-            self.r_high = self.current_high
-            self.r_low = self.current_low
+            self.r_high = current_high
+            self.r_low = current_low
             
-            self.r_tp_price_long = self.r_open + (self.r_open * self.take_profit/100)
-            self.r_tp_price_short = self.r_open - (self.r_open * self.take_profit/100)
-            self.r_sl_price_long = self.r_open - (self.r_open * self.stop_loss/100)
-            self.r_sl_price_short = self.r_open + (self.r_open * self.stop_loss/100)
+            self.r_tp_price_long = self.r_open + (self.r_open * self.take_profit)
+            self.r_tp_price_short = self.r_open - (self.r_open * self.take_profit)
+            self.r_sl_price_long = self.r_open - (self.r_open * self.stop_loss)
+            self.r_sl_price_short = self.r_open + (self.r_open * self.stop_loss)
             
-            if(self.long):
+            if(self.r_long):
                 self.r_current_trade_long = True
                 self.r_current_trade_short = False
-            elif(self.short):
+            elif(self.r_short):
                 self.r_current_trade_short = True
                 self.r_current_trade_long = False
+                
+            # ############################################################################
+            # Order Size. 
+            # ############################################################################
+            
+            self.current_order_size = self.order_size
+
 
 
         # ############################################################################
@@ -248,22 +259,22 @@ class CryptoEnvContinuous(TradingEnv):
         # ############################################################################
         
         if(self.r_active_trade):
-            self.r_close = self.current_close
-            if(self.current_high > self.r_high):
-                self.r_high = self.current_high
-            if(self.current_low < self.r_low):
-                self.r_low = self.current_low
+            self.r_close = current_close
+            if(current_high > self.r_high):
+                self.r_high = current_high
+            if(current_low < self.r_low):
+                self.r_low = current_low
             
             # Check if SL or TP are hit, assign current index to self.r_tp_hit_index or self.r_sl_hit_index
-            if(self.long and self.r_sl_hit_index == None):
-                if(self.current_low <= self.r_sl_price_long):
+            if(self.r_long and self.r_sl_hit_index == None):
+                if(current_low <= self.r_sl_price_long):
                     self.r_sl_hit_index = self.r_index
-                if(self.current_high >= self.r_tp_price_long):
+                if(current_high >= self.r_tp_price_long):
                     self.r_tp_hit_index = self.r_index
-            if(self.short and self.r_sl_hit_index == None):
-                if(self.current_high >= self.r_sl_price_short):
+            if(self.r_short and self.r_sl_hit_index == None):
+                if(current_high >= self.r_sl_price_short):
                     self.r_sl_hit_index = self.r_index
-                if(self.current_low <= self.r_tp_price_short):
+                if(current_low <= self.r_tp_price_short):
                     self.r_tp_hit_index = self.r_index        
                     
                     
@@ -271,7 +282,7 @@ class CryptoEnvContinuous(TradingEnv):
         # Close trade when signal condition is met
         # If open_trade=True, close trade. Then open next trade
         # ########################################################
-        # self.r_close_trade_signal = (self.r_active_trade == True) and ((self.r_current_trade_long and self.short) or (self.r_current_trade_short and self.long) or (self.r_tp_hit_index or self.r_sl_hit_index))
+        # self.r_close_trade_signal = (self.r_active_trade == True) and ((self.r_current_trade_long and self.r_short) or (self.r_current_trade_short and self.r_long) or (self.r_tp_hit_index or self.r_sl_hit_index))
         self.r_close_trade_signal = (self.r_active_trade == True) and (self.r_tp_hit_index or self.r_sl_hit_index)
         
         
@@ -286,13 +297,6 @@ class CryptoEnvContinuous(TradingEnv):
             self.r_trade_signal = False
             self.r_close_trade_signal = False
             self.r_active_trade = False
-
-
-            # ############################################################################
-            # Order Size. 
-            # ############################################################################
-            
-            self.current_order_size = self.order_size
 
 
             # ############################################################################
@@ -312,14 +316,14 @@ class CryptoEnvContinuous(TradingEnv):
             if(self.entry_order_type == 'MARKET'):
                 self.entry_fees = self.current_order_size * (self.fees_taker_percentage/100)
                 if(self.market_fees_slippage_simulation):
-                    self.r_slippage_fees += self.current_order_size * (self.market_fees_slippage_simulation/100)
+                    self.r_slippage_fees = self.current_order_size * (self.market_fees_slippage_simulation/100)
             if(self.entry_order_type == 'LIMIT'):
                 self.entry_fees = self.current_order_size * (self.fees_maker_percentage/100)
 
             if(self.exit_order_type == 'MARKET'):
                 self.exit_fees = (self.current_order_size + self.r_pnl) * (self.fees_taker_percentage/100)
                 if(self.market_fees_slippage_simulation):
-                    self.r_slippage_fees += self.current_order_size * (self.market_fees_slippage_simulation/100)
+                    self.r_slippage_fees = self.current_order_size * (self.market_fees_slippage_simulation/100)
             if(self.exit_order_type == 'LIMIT'):
                 self.exit_fees = (self.current_order_size + self.r_pnl) * (self.fees_maker_percentage/100)
 
@@ -391,7 +395,7 @@ class CryptoEnvContinuous(TradingEnv):
             self.r_tp_hit_index = None
         
             # calculate the return
-            self.r_pnl_return = self.r_pnl / self.current_order_size
+            self.r_pnl_return = (self.r_pnl / self.current_order_size) * 100
         
         # if a trade is currently open, give an iterim reward
         if(self.r_active_trade):
@@ -401,7 +405,7 @@ class CryptoEnvContinuous(TradingEnv):
                 interim_reward = ((((1/self.r_open) - (1/self.r_close)) * (self.current_order_size * -1)) * self.r_close)
                 
             # convert to return
-            interim_return = interim_reward / self.current_order_size
+            interim_return = (interim_reward / self.current_order_size) * 100
             return self.noise_function(interim_return / 10)
         
         return self.noise_function(self.r_pnl_return)
@@ -411,10 +415,10 @@ class CryptoEnvContinuous(TradingEnv):
     def calculate_profit(self, action):
         
         self.index += 1
-        self.current_open = self.prices[self.last_trade_tick]
-        self.current_low = self.hl['Low'][self.current_tick]
-        self.current_high = self.hl['High'][self.current_tick]
-        self.current_close = self.prices[self.current_tick]
+        current_open = self.prices[self.last_trade_tick]
+        current_low = self.hl['Low'][self.current_tick]
+        current_high = self.hl['High'][self.current_tick]
+        current_close = self.prices[self.current_tick]
         
         
         # ############################################################################
@@ -424,17 +428,16 @@ class CryptoEnvContinuous(TradingEnv):
         self.long = True if (action == Actions.Buy.value) else False
         self.short = True if (action == Actions.Sell.value) else False
         self.open_trade_signal = (self.long or self.short) and (self.active_trade == False)
-        self.close_trade_signal = (self.active_trade == True) and ((self.current_trade_long and self.short) or (self.current_trade_short and self.long) or (self.tp_hit_index or self.sl_hit_index))
         
         # ########################################################
         # If conditions are OK, open trade and set open variables.
         # ########################################################
         
         if(self.open_trade_signal == True):
-            self.open = self.current_open
+            self.open = current_open
             self.active_trade = True
-            self.high = self.current_high
-            self.low = self.current_low
+            self.high = current_high
+            self.low = current_low
             
             self.tp_price_long = self.open + (self.open * self.take_profit/100)
             self.tp_price_short = self.open - (self.open * self.take_profit/100)
@@ -455,28 +458,36 @@ class CryptoEnvContinuous(TradingEnv):
         # ############################################################################
         
         if(self.active_trade):
-            self.close = self.current_close
-            if(self.current_high > self.high):
-                self.high = self.current_high
-            if(self.current_low < self.low):
-                self.low = self.current_low
+            self.close = current_close
+            if(current_high > self.high):
+                self.high = current_high
+            if(current_low < self.low):
+                self.low = current_low
             
             # Check if SL or TP are hit, assign current index to self.tp_hit_index or self.sl_hit_index
             if(self.long and self.sl_hit_index == None):
-                if(self.current_low <= self.sl_price_long):
+                if(current_low <= self.sl_price_long):
                     self.sl_hit_index = self.index
-                if(self.current_high >= self.tp_price_long):
+                if(current_high >= self.tp_price_long):
                     self.tp_hit_index = self.index
             if(self.short and self.sl_hit_index == None):
-                if(self.current_high >= self.sl_price_short):
+                if(current_high >= self.sl_price_short):
                     self.sl_hit_index = self.index
-                if(self.current_low <= self.tp_price_short):
+                if(current_low <= self.tp_price_short):
                     self.tp_hit_index = self.index        
                     
-                    
+
         # ########################################################
         # Close trade when signal condition is met
         # If open_trade=True, close trade. Then open next trade
+        # ########################################################
+        
+        # self.close_trade_signal = (self.active_trade == True) and ((self.current_trade_long and self.short) or (self.current_trade_short and self.long) or (self.tp_hit_index or self.sl_hit_index))
+        self.close_trade_signal = (self.active_trade == True) and (self.tp_hit_index or self.sl_hit_index)
+        
+        
+        # ########################################################
+        # Close trade when signal condition is met
         # ########################################################
             
         if(self.active_trade and self.close_trade_signal):
@@ -506,14 +517,14 @@ class CryptoEnvContinuous(TradingEnv):
             if(self.entry_order_type == 'MARKET'):
                 self.entry_fees = order_size * (self.fees_taker_percentage/100)
                 if(self.market_fees_slippage_simulation):
-                    self.slippage_fees += order_size * (self.market_fees_slippage_simulation/100)
+                    self.slippage_fees = order_size * (self.market_fees_slippage_simulation/100)
             if(self.entry_order_type == 'LIMIT'):
                 self.entry_fees = order_size * (self.fees_maker_percentage/100)
 
             if(self.exit_order_type == 'MARKET'):
                 self.exit_fees = (order_size + self.pnl) * (self.fees_taker_percentage/100)
                 if(self.market_fees_slippage_simulation):
-                    self.slippage_fees += order_size * (self.market_fees_slippage_simulation/100)
+                    self.slippage_fees = order_size * (self.market_fees_slippage_simulation/100)
             if(self.exit_order_type == 'LIMIT'):
                 self.exit_fees = (order_size + self.pnl) * (self.fees_maker_percentage/100)
 

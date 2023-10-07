@@ -4,6 +4,8 @@ from gymnasium.utils import seeding
 import numpy as np
 from enum import Enum
 import matplotlib.pyplot as plt
+import math
+
 
 
 class Actions(Enum):
@@ -48,9 +50,11 @@ class TradingEnv(gym.Env):
         self.position = Positions.NoPosition
         self.position_history = (self.window_size * [None]) + [self.position]
         self.total_reward = 0.
-        self.total_profit = 10000.
+        self.total_profit = 1000.
         self.first_rendering = True
         self.history = None
+        
+        self.debug_rewards = []
 
 
     def seed(self, seed=None):
@@ -84,6 +88,12 @@ class TradingEnv(gym.Env):
 
         step_reward = self.calculate_reward(action)
         self.total_reward += step_reward
+        
+        # check numpy if any nan values in self.debug_rewards
+        
+        # self.debug_rewards.append(step_reward)
+        # if np.isnan(self.debug_rewards).any():
+        #     print(self.debug_rewards)
         
         profit = self.calculate_profit(action)
         self.total_profit += profit
