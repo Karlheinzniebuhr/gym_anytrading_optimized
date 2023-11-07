@@ -4,18 +4,19 @@ from gymnasium.utils import seeding
 import numpy as np
 from enum import Enum
 import matplotlib.pyplot as plt
+import random
 
 
 class Actions(Enum):
-    Skip = 0
-    Sell = 1
-    Buy = 2
+    Sell = 0
+    Buy = 1
+    Skip = 2
 
 
 class Positions(Enum):
-    NoPosition = 1
-    Short = 1
-    Long = 2
+    Short = 0
+    Long = 1
+    NoPosition = 2
 
 
 class TradingEnv(gym.Env):
@@ -63,14 +64,17 @@ class TradingEnv(gym.Env):
         self.truncated = False
         self.current_tick = self.start_tick
         self.last_trade_tick = self.current_tick - 1
-        self.position = Positions.Short
+        self.position = Positions.NoPosition
         self.position_history = (self.window_size * [None]) + [self.position]
         self.total_reward = 0.
-        self.total_profit = 1.
+        self.total_profit = 1000.
         self.first_rendering = True
         
         self.history = None
 
+        # Set the environment specification id
+        self.spec = gym.envs.registration.EnvSpec('BinaryOptions-v0')
+        
 
     def seed(self, seed=None):
         self.np_random, seed = seeding.np_random(seed)
@@ -81,17 +85,23 @@ class TradingEnv(gym.Env):
         super().reset(seed=seed, options=options)
         self.done = False
         self.truncated = False
+        
+        # Sample random start tick between window_size and end_tick
+        self.start_tick = random.randint(self.window_size, self.end_tick - self.window_size)
+        
+        # Adjust current tick and last trade tick accordingly
         self.current_tick = self.start_tick
         self.last_trade_tick = self.current_tick - 1
-        self.position = Positions.Short
+        
+        self.position = Positions.NoPosition
         self.position_history = (self.window_size * [None]) + [self.position]
         self.total_reward = 0.
-        self.total_profit = 1.
+        self.total_profit = 1000.
         self.first_rendering = True
         self.history = {}
         
         # generate new noisy observations
-        self.prices, self.hl, self.signal_features = self.process_data()
+        # self.prices, self.hl, self.signal_features = self.process_data()
         
         return self.get_observation(), self.history
 
@@ -100,19 +110,18 @@ class TradingEnv(gym.Env):
         # action, bet_size_index = action
         # bet_size = self.bet_sizes[bet_size_index]
                
-        self.done = False
-        self.truncated = False
-        self.current_tick += 1
-
-        if self.current_tick == self.end_tick:
+        if self.current_tick >= self.end_tick:
+            self.truncated = True
             self.done = True
+        else:
+            self.current_tick += 1
 
         step_reward = self.calculate_reward(action)
-        
         self.total_reward += step_reward
         
         profit = self.calculate_profit(action)
         self.total_profit += profit
+            
             
         # if action == Actions.Buy.value, set position to Long
         if(action == Actions.Buy.value):
@@ -133,6 +142,9 @@ class TradingEnv(gym.Env):
             position = self.position.value
         )
         self.update_history(info)
+
+        # update the last trade tick
+        self.last_trade_tick = self.current_tick
 
         return observation, step_reward, self.done, self.truncated, info
 

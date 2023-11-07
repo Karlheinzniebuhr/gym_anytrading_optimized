@@ -4,18 +4,20 @@ from gymnasium.utils import seeding
 import numpy as np
 from enum import Enum
 import matplotlib.pyplot as plt
+import random
+
 
 class Actions(Enum):
     Sell = 0
     Buy = 1
+    Skip = 2
 
 
 class Positions(Enum):
     Short = 0
     Long = 1
+    NoPosition = 2
 
-    def opposite(self):
-        return Positions.Short if self == Positions.Long else Positions.Long
 
 
 class TradingEnv(gym.Env):
@@ -62,14 +64,17 @@ class TradingEnv(gym.Env):
         self.truncated = False
         self.current_tick = self.start_tick
         self.last_trade_tick = self.current_tick - 1
-        self.position = Positions.Short
+        self.position = Positions.NoPosition
         self.position_history = (self.window_size * [None]) + [self.position]
         self.total_reward = 0.
-        self.total_profit = 1.
+        self.total_profit = 1000.
         self.first_rendering = True
         
         self.history = None
 
+        # Set the environment specification id
+        self.spec = gym.envs.registration.EnvSpec('DiscreteEnv-v0')
+        
 
     def seed(self, seed=None):
         self.np_random, seed = seeding.np_random(seed)
@@ -80,48 +85,50 @@ class TradingEnv(gym.Env):
         super().reset(seed=seed, options=options)
         self.done = False
         self.truncated = False
+        
+        # Sample random start tick between window_size and end_tick
+        self.start_tick = random.randint(self.window_size, self.end_tick - self.window_size)
+        
+        # Adjust current tick and last trade tick accordingly
         self.current_tick = self.start_tick
         self.last_trade_tick = self.current_tick - 1
-        self.position = Positions.Short
+        
+        self.position = Positions.NoPosition
         self.position_history = (self.window_size * [None]) + [self.position]
         self.total_reward = 0.
-        self.total_profit = 1.
+        self.total_profit = 1000.
         self.first_rendering = True
         self.history = {}
         
         # generate new noisy observations
-        self.prices, self.hl, self.signal_features = self.process_data()
+        # self.prices, self.hl, self.signal_features = self.process_data()
         
         return self.get_observation(), self.history
 
 
     def step(self, action):
-        # buy_sell_action, tp_distance, sl_distance = action
-        # tp_distance = self.take_profit_distances[tp_distance]
-        # sl_distance = self.stop_loss_distances[sl_distance]
-        
-        self.done = False
+        # action, bet_size_index = action
+        # bet_size = self.bet_sizes[bet_size_index]
+               
         self.truncated = False
-        self.current_tick += 1
-
-        if self.current_tick == self.end_tick:
-            self.done = True
 
         step_reward = self.calculate_reward(action)
-        
         self.total_reward += step_reward
         
         profit = self.calculate_profit(action)
         self.total_profit += profit
             
-        trade = False
-        if ((action == Actions.Buy.value and self.position == Positions.Short) or
-            (action == Actions.Sell.value and self.position == Positions.Long)):
-            trade = True
+            
+        # if action == Actions.Buy.value, set position to Long
+        if(action == Actions.Buy.value):
+            self.position = Positions.Long
+        # if action == Actions.Sell.value, set position to Short
+        elif(action == Actions.Sell.value):
+            self.position = Positions.Short
+        # if action == Actions.Skip.value, set position to NoPosition
+        else:
+            self.position = Positions.NoPosition
 
-        if trade:
-            self.position = self.position.opposite()
-            self.last_trade_tick = self.current_tick
             
         self.position_history.append(self.position)
         observation = self.get_observation()
@@ -131,6 +138,14 @@ class TradingEnv(gym.Env):
             position = self.position.value
         )
         self.update_history(info)
+
+        # update the last trade tick
+        self.last_trade_tick = self.current_tick
+        # increase the current tick
+        self.current_tick += 1
+        
+        if self.current_tick == self.end_tick:
+            self.done = True
 
         return observation, step_reward, self.done, self.truncated, info
 

@@ -1,17 +1,107 @@
 import numpy as np
+import numba as nb
+import pandas as pd
+import os
+import pickle
 
 from ..noise import NoiseGenerator
 from .trading_env import TradingEnv, Actions, Positions
 
 
+
+@nb.jit
+def label_dataframe(open_prices, high_prices, low_prices, close_prices, stop_loss, take_profit):
+    labels_list = []  # Initialize an empty list to store label tuples
+
+    for i in range(len(open_prices)):
+        open_price = open_prices[i]
+        high_price = high_prices[i]
+        low_price = low_prices[i]
+        close_price = close_prices[i]
+
+        # Initialize labels for long and short
+        long_label = 0
+        short_label = 0
+
+        # Assuming the trade is long, calculate take profit and stop loss prices
+        take_profit_price_long = open_price * (1 + take_profit)
+        stop_loss_price_long = open_price * (1 - stop_loss)
+
+        # Assuming the trade is short, calculate take profit and stop loss prices
+        take_profit_price_short = open_price * (1 - take_profit)
+        stop_loss_price_short = open_price * (1 + stop_loss)
+
+        # Initialize a counter for measuring the number of iterations
+        iteration_count = 0
+        
+        # Track if both SL and TP are hit at the same time
+        both_hit = False
+
+        # Loop forward to check if take profit or stop loss is hit for long trade
+        j = i + 1
+        while j < len(open_prices):
+            iteration_count += 1
+            next_high = high_prices[j]
+            next_low = low_prices[j]
+
+            # Check if both stop loss and take profit are hit for long trade
+            if next_high > take_profit_price_long and next_low < stop_loss_price_long:
+                both_hit = True
+                long_label = 0  # Label as no trade (0) if both stop loss and take profit are hit
+                break
+
+            elif next_high > take_profit_price_long:
+                long_label = 1  # Label as long (1) if take profit is hit
+                break
+            elif next_low < stop_loss_price_long:
+                long_label = -1  # Label as long (-1) if stop loss is hit
+                break
+
+            j += 1
+
+        # Loop forward to check if take profit or stop loss is hit for short trade
+        j = i + 1
+        while j < len(open_prices):
+            iteration_count += 1
+            next_high = high_prices[j]
+            next_low = low_prices[j]
+
+            # Check if both stop loss and take profit are hit for short trade
+            if next_low < take_profit_price_short and next_high > stop_loss_price_short:
+                # Set both_hit to True at current index
+                both_hit = True
+                short_label = 0  # Label as no trade (0) if both stop loss and take profit are hit
+                break
+
+            elif next_low < take_profit_price_short:
+                short_label = 1  # Label as short (1) if take profit is hit
+                break
+            elif next_high > stop_loss_price_short:
+                short_label = -1  # Label as short (-1) if stop loss is hit
+                break
+
+            j += 1
+
+        # Determine the final label and add it to the list as a tuple with the iteration count
+        if long_label == 1:
+            labels_list.append((1, iteration_count, both_hit))  # Append tuple (open_time, 1, iteration_count) if long trade is a win
+        elif short_label == 1:
+            labels_list.append((-1, iteration_count, both_hit))  # Append tuple (open_time, -1, iteration_count) if short trade is a win
+        else:
+            labels_list.append((0, iteration_count, both_hit))  # Append tuple (open_time, 0, iteration_count) if neither long nor short trade is a win
+
+    return labels_list
+
+    
+    
 class CryptoEnvContinuous(TradingEnv):
 
-    def __init__(self, df, window_size, frame_bound, noise=False):
+    def __init__(self, df, window_size, frame_bound, random_init_start_tick=True, noise=False):
         assert len(frame_bound) == 2
-
 
         # Configuration Parameters
         self.frame_bound = frame_bound
+        self.enable_sltp = True
         self.stop_loss = 1/100
         self.take_profit = 2/100
         self.order_size = 1000
@@ -47,6 +137,9 @@ class CryptoEnvContinuous(TradingEnv):
         self.r_sl_hit_index = None
         self.r_slippage_fees = 0.0
         
+        self.fixed_penalty = -0.001
+        self.fixed_reward = 0.001
+        self.trade_directions = []
         
         # Current Trade Variables Profit
         self.trade_signal = False
@@ -56,10 +149,10 @@ class CryptoEnvContinuous(TradingEnv):
         self.current_trade_long = False
         self.current_trade_short = False
         self.active_trade = False
-        self.open = 0.0
-        self.high = 0.0
-        self.low = 0.0
-        self.close = 0.0
+        self.candle_open = 0.0
+        self.candle_high = 0.0
+        self.candle_low = 0.0
+        self.candle_close = 0.0
         self.tp_price_long = 0.0
         self.tp_price_short = 0.0
         self.sl_price_long = 0.0
@@ -83,11 +176,19 @@ class CryptoEnvContinuous(TradingEnv):
             self.process_data = self.ornstein_uhlenbeck_noise
         else:
             self.process_data = self.process_data
-        
-        super().__init__(df, window_size)
+            
 
-    
-    
+        open_prices = np.array(df['Open'])
+        high_prices = np.array(df['High'])
+        low_prices = np.array(df['Low'])
+        close_prices = np.array(df['Close'])
+        labels_list = label_dataframe(open_prices, high_prices, low_prices, close_prices, self.stop_loss, self.take_profit)
+        self.labels_df = pd.DataFrame(labels_list, columns=['label', 'iteration_count', 'both_hit'])
+        
+        super().__init__(df, window_size, random_init_start_tick)
+
+
+
     # Ornstein-Uhlenbeck noise v2
     def ornstein_uhlenbeck_noise(self):
         start = self.frame_bound[0] - self.window_size
@@ -138,77 +239,116 @@ class CryptoEnvContinuous(TradingEnv):
         signal_features = np.column_stack((signal_features, diff_prices))
 
         return prices, hl, signal_features
-    
-    
-    
-    # Normal noise
-    def normal_noise(self):
-        start = self.frame_bound[0] - self.window_size
-        end = self.frame_bound[1]
-        df = self.df.iloc[start:end, :]
 
-        # Define parameters for normal noise
-        noise_mean = 1  # The mean of the normal distribution
-        noise_std = 0.01  # The standard deviation of the normal distribution
 
-        # Generate normal noise with the given standard deviation
-        noise_open = np.random.normal(noise_mean, noise_std, size=df.shape[0])
-        noise_high = np.random.normal(noise_mean, noise_std, size=df.shape[0])
-        noise_low = np.random.normal(noise_mean, noise_std, size=df.shape[0])
-        noise_close = np.random.normal(noise_mean, noise_std, size=df.shape[0])
 
-        # Create a new DataFrame df_noisy to store noisy data
-        df_noisy = df.copy()
-
-        # Apply normal noise to each column of df_noisy
-        df_noisy['Open'] *= noise_open
-        df_noisy['High'] *= noise_high
-        df_noisy['Low'] *= noise_low
-        df_noisy['Close'] *= noise_close
-
-        # Scale signal features
-        signal_features = df_noisy[['Open', 'High', 'Low', 'Close']].values
-
-        hl = df_noisy[['High', 'Low']].reset_index()
-
-        # Calculate the differences in prices
-        prices = df_noisy['Close'].to_numpy()  # Extract Close prices
-        diff_prices = np.insert(np.diff(prices), 0, 0)
-
-        # Add the differences in prices to the signal features
-        signal_features = np.column_stack((signal_features, diff_prices))
-
-        return prices, hl, signal_features
-    
-    
-    
     def process_data(self):
         start = self.frame_bound[0] - self.window_size
         end = self.frame_bound[1]
         df = self.df.iloc[start:end, :]
 
         # scale signal features
-        signal_features = df[['Open', 'High', 'Low', 'Close']].values
-
-        hl = df[['High', 'Low']].reset_index()
+        signal_features = df[['High', 'Low', 'Close']].values
         
         prices = df['Close'].to_numpy()
-        diff_prices = np.insert(np.diff(prices), 0, 0)
+        # diff_prices = np.insert(np.diff(prices), 0, 0)
+        # diff_volume = np.insert(np.diff(df['Volume'].to_numpy()), 0, 0)
         
-        signal_features = np.column_stack((signal_features, diff_prices))
+        # signal_features = np.column_stack((diff_prices, diff_volume))
 
+        hl = df[['High', 'Low']].reset_index()
         return prices, hl, signal_features
+    
+    
+    
+    # def process_data(self):
+    #     start = self.frame_bound[0] - self.window_size
+    #     end = self.frame_bound[1]
+    #     df = self.df.iloc[start:end, :]
+
+    #     # signal_features = df[['High', 'Low', 'Close']].values
+
+    #     ma1000 = df['Close'].rolling(window=1000).mean().to_numpy()
+    #     ma99 = df['Close'].rolling(window=99).mean().to_numpy()
+    #     ma25 = df['Close'].rolling(window=25).mean().to_numpy()
+    #     ma7 = df['Close'].rolling(window=7).mean().to_numpy()
+
+    #     diff_1000 = np.insert(np.diff(ma1000), 0, 0)
+    #     diff_ma99 = np.insert(np.diff(ma99), 0, 0)
+    #     diff_ma25 = np.insert(np.diff(ma25), 0, 0)
+    #     diff_ma7 = np.insert(np.diff(ma7), 0, 0)
+
+    #     # Calculate percentage changes between MAs
+    #     percentage_change_ma7_ma25 = ((ma7 - ma25) / ma25) * 10000
+    #     percentage_change_ma25_ma99 = ((ma25 - ma99) / ma99) * 10000
+    #     percentage_change_ma7_ma99 = ((ma7 - ma99) / ma99) * 10000
+
+    #     signal_features = np.column_stack((
+    #         diff_1000, diff_ma99, diff_ma25, diff_ma7,
+    #         percentage_change_ma7_ma25,
+    #         percentage_change_ma25_ma99,
+    #         percentage_change_ma7_ma99
+    #     ))
+        
+    #     prices = df['Close'].to_numpy()
+    #     hl = df[['High', 'Low']].reset_index()
+
+    #     return prices, hl, signal_features
+
+
+
+    def calculate_reward_sim_multiverse(self, action):
+        # Lookup if the current action is a win or loss
+        mv_label = self.labels_df.iloc[self.current_tick]
+        win_loss_skip_label = mv_label['label']
+        iteration_count = mv_label['iteration_count']
+
+        # Normalize the reward 
+        reward_weight = (1.0 + (1.0 / iteration_count)) * 2
+        
+        if action == Actions.Skip.value:
+            # Skip condition
+            if win_loss_skip_label == 0:
+                # Skipped correctly
+                return 0.0
+            elif (win_loss_skip_label == 1) or (win_loss_skip_label == -1):
+                return 0.0
+                # Opportunity cost
+                # loss_reward = (-self.stop_loss * self.order_size)
+                # return loss_reward
+
+        elif (action == Actions.Buy.value and win_loss_skip_label == 1) or (action == Actions.Sell.value and win_loss_skip_label == -1):
+            # Win condition: Action is in favor (Buy and label is 1) or (Sell and label is -1)
+            # Calculate the win reward proportionally to take_profit
+            win_reward = reward_weight * self.take_profit * self.order_size
+            return win_reward
+
+        elif (action == Actions.Buy.value and win_loss_skip_label == -1) or (action == Actions.Sell.value and win_loss_skip_label == 1):
+            # Loss condition: Action is against (Buy and label is -1) or (Sell and label is 1)
+            # Calculate the loss reward proportionally to stop_loss
+            loss_reward = -self.stop_loss * self.order_size
+            return loss_reward
+
+        else:
+            # Loss condition: Action is against (Buy and label is 0) or (Sell and label is 0)
+            # Calculate the loss reward proportionally to stop_loss
+            loss_reward = (-self.stop_loss * self.order_size)
+            return loss_reward
 
 
 
     def calculate_reward_sim(self, action):
-
-        # discourage too much skipping, (fine-tune this hyperparameter)
+        
+        # Lookup if the current action is a win or loss
+        # win_loss_skip_label = self.labels_df.iloc[self.last_trade_tick]['label']
+        
         if((action == Actions.Skip.value) and (self.r_active_trade == False)):
-            return self.noise_function(-0.01)
+            # interim_reward = self.calculate_reward_sim_multiverse(action)
+            return self.fixed_penalty
+        
         
         self.r_index += 1
-        current_open = self.prices[self.last_trade_tick]
+        current_open = self.prices[self.current_tick - 1]
         current_low = self.hl['Low'][self.current_tick]
         current_high = self.hl['High'][self.current_tick]
         current_close = self.prices[self.current_tick]
@@ -217,9 +357,10 @@ class CryptoEnvContinuous(TradingEnv):
         # ############################################################################
         # Signals creation block
         # ############################################################################
-            
+        
         self.r_long = True if (action == Actions.Buy.value) else False
         self.r_short = True if (action == Actions.Sell.value) else False
+        self.skip = True if ((action == Actions.Skip.value)) else False
         self.r_trade_signal = (self.r_long or self.r_short) and (self.r_active_trade == False)
 
 
@@ -245,12 +386,13 @@ class CryptoEnvContinuous(TradingEnv):
                 self.r_current_trade_short = True
                 self.r_current_trade_long = False
                 
+            self.trade_directions.append(action)
+                
             # ############################################################################
             # Order Size. 
             # ############################################################################
             
             self.current_order_size = self.order_size
-
 
 
         # ############################################################################
@@ -266,26 +408,42 @@ class CryptoEnvContinuous(TradingEnv):
                 self.r_low = current_low
             
             # Check if SL or TP are hit, assign current index to self.r_tp_hit_index or self.r_sl_hit_index
-            if(self.r_long and self.r_sl_hit_index == None):
-                if(current_low <= self.r_sl_price_long):
-                    self.r_sl_hit_index = self.r_index
-                if(current_high >= self.r_tp_price_long):
-                    self.r_tp_hit_index = self.r_index
-            if(self.r_short and self.r_sl_hit_index == None):
-                if(current_high >= self.r_sl_price_short):
-                    self.r_sl_hit_index = self.r_index
-                if(current_low <= self.r_tp_price_short):
-                    self.r_tp_hit_index = self.r_index        
+            if(self.enable_sltp):
+                if(self.r_long and self.r_sl_hit_index == None):
+                    if(current_low <= self.r_sl_price_long):
+                        self.r_sl_hit_index = self.r_index
+                    if(current_high >= self.r_tp_price_long):
+                        self.r_tp_hit_index = self.r_index
+                if(self.r_short and self.r_sl_hit_index == None):
+                    if(current_high >= self.r_sl_price_short):
+                        self.r_sl_hit_index = self.r_index
+                    if(current_low <= self.r_tp_price_short):
+                        self.r_tp_hit_index = self.r_index        
                     
                     
         # ########################################################
         # Close trade when signal condition is met
         # If open_trade=True, close trade. Then open next trade
         # ########################################################
-        # self.r_close_trade_signal = (self.r_active_trade == True) and ((self.r_current_trade_long and self.r_short) or (self.r_current_trade_short and self.r_long) or (self.r_tp_hit_index or self.r_sl_hit_index))
-        self.r_close_trade_signal = (self.r_active_trade == True) and (self.r_tp_hit_index or self.r_sl_hit_index)
         
-        
+        if(self.enable_sltp):
+            self.r_close_trade_signal = (
+                (self.r_active_trade == True) and
+                (
+                    (self.r_tp_hit_index != None) or
+                    (self.r_sl_hit_index != None) or
+                    (self.skip)
+                )
+            )
+        else:
+            self.r_close_trade_signal = (
+                (self.r_active_trade == True) and
+                (
+                    (self.skip)
+                )
+            )
+
+
         # ########################################################
         # Close trade when signal condition is met
         # If open_trade=True, close trade. Then open next trade
@@ -337,85 +495,93 @@ class CryptoEnvContinuous(TradingEnv):
             # TP/SL & liquidation PNL
             # ##############################################
 
-            # if TP and SL are both hit at the same candle, flip a probabilistic coin to determine the outcome
-            if((self.take_profit != 0 and self.stop_loss != 0) and (self.sl_hit_index == self.tp_hit_index) and (self.sl_hit_index != None)):
+            if(self.enable_sltp):
+                # if TP and SL are both hit at the same candle, flip a probabilistic coin to determine the outcome
+                if((self.sl_hit_index == self.tp_hit_index) and (self.sl_hit_index != None)):
+                    
+                    # calculate the probability of each outcome based on the TP/SL distance. Example if TP is 0.5% and SL is 0.1% then the probability of TP being hit is 0.833 and SL being hit is 0.167
+                    tp_prob = self.stop_loss / (self.take_profit + self.stop_loss)
+                    sl_prob = self.take_profit / (self.take_profit + self.stop_loss)
+                    
+                    coinflip = np.random.choice([0,1], p=[tp_prob, sl_prob])
+                    # self.coinflips.append(coinflip)
+                    
+                    # Win
+                    if(coinflip == 0):
+                        if(self.current_trade_long and (self.candle_high >= self.tp_price_long)):
+                            self.pnl = ((((1/self.candle_open) - (1/self.tp_price_long)) * self.current_order_size) * self.tp_price_long)
+                            self.pnl = self.pnl - self.current_order_size * (self.fees_maker_percentage/100)
+                        # maker TP short
+                        if(self.current_trade_short and (self.candle_low <= self.tp_price_short)):
+                            self.pnl = ((((1/self.candle_open) - (1/self.tp_price_short)) * (self.current_order_size * -1)) * self.tp_price_short)
+                            self.pnl = self.pnl - self.current_order_size * (self.fees_maker_percentage/100)
+                        
+                    # Loss
+                    else:
+                        if(self.current_trade_long and (self.candle_low <= self.sl_price_long)):
+                            self.pnl = ((((1/self.candle_open) - (1/self.sl_price_long)) * self.current_order_size) * self.sl_price_long)
+                            self.pnl = self.pnl - (self.current_order_size * (self.fees_taker_percentage/100)) - (self.current_order_size * (self.market_fees_slippage_simulation/100))
+                        # taker SL short
+                        elif(self.current_trade_short and (self.candle_high >= self.sl_price_short)):
+                            self.pnl = ((((1/self.candle_open) - (1/self.sl_price_short)) * (self.current_order_size * -1)) * self.sl_price_short)
+                            self.pnl = self.pnl - (self.current_order_size * (self.fees_taker_percentage/100)) - (self.current_order_size * (self.market_fees_slippage_simulation/100))
                 
-                # calculate the probability of each outcome based on the TP/SL distance. Example if TP is 0.5% and SL is 0.1% then the probability of TP being hit is 0.833 and SL being hit is 0.167
-                tp_prob = self.stop_loss / (self.take_profit + self.stop_loss)
-                sl_prob = self.take_profit / (self.take_profit + self.stop_loss)
                 
-                coinflip = np.random.choice([0,1], p=[tp_prob, sl_prob])
-                # self.coinflips.append(coinflip)
-                
-                # Win
-                if(coinflip == 0):
-                    if(self.current_trade_long and (self.high >= self.tp_price_long)):
-                        self.pnl = ((((1/self.open) - (1/self.tp_price_long)) * self.current_order_size) * self.tp_price_long)
+                # if TP is hit
+                if(self.tp_hit_index != None):
+                    # maker TP long
+                    if(self.current_trade_long and (self.candle_high >= self.tp_price_long)):
+                        self.pnl = ((((1/self.candle_open) - (1/self.tp_price_long)) * self.current_order_size) * self.tp_price_long)
                         self.pnl = self.pnl - self.current_order_size * (self.fees_maker_percentage/100)
                     # maker TP short
-                    if(self.current_trade_short and (self.low <= self.tp_price_short)):
-                        self.pnl = ((((1/self.open) - (1/self.tp_price_short)) * (self.current_order_size * -1)) * self.tp_price_short)
+                    if(self.current_trade_short and (self.candle_low <= self.tp_price_short)):
+                        self.pnl = ((((1/self.candle_open) - (1/self.tp_price_short)) * (self.current_order_size * -1)) * self.tp_price_short)
                         self.pnl = self.pnl - self.current_order_size * (self.fees_maker_percentage/100)
-                       
-                # Loss
-                else:
-                    if(self.current_trade_long and (self.low <= self.sl_price_long)):
-                        self.pnl = ((((1/self.open) - (1/self.sl_price_long)) * self.current_order_size) * self.sl_price_long)
-                        self.pnl = self.pnl - (self.current_order_size * (self.fees_taker_percentage/100)) - (self.current_order_size * (self.market_fees_slippage_simulation/100))
-                    # taker SL short
-                    elif(self.current_trade_short and (self.high >= self.sl_price_short)):
-                        self.pnl = ((((1/self.open) - (1/self.sl_price_short)) * (self.current_order_size * -1)) * self.sl_price_short)
-                        self.pnl = self.pnl - (self.current_order_size * (self.fees_taker_percentage/100)) - (self.current_order_size * (self.market_fees_slippage_simulation/100))
-            
-            
-            # if TP is hit
-            elif((self.take_profit != 0) and (self.tp_hit_index != None)):
-                # maker TP long
-                if(self.current_trade_long and (self.high >= self.tp_price_long)):
-                    self.pnl = ((((1/self.open) - (1/self.tp_price_long)) * self.current_order_size) * self.tp_price_long)
-                    self.pnl = self.pnl - self.current_order_size * (self.fees_maker_percentage/100)
-                # maker TP short
-                if(self.current_trade_short and (self.low <= self.tp_price_short)):
-                    self.pnl = ((((1/self.open) - (1/self.tp_price_short)) * (self.current_order_size * -1)) * self.tp_price_short)
-                    self.pnl = self.pnl - self.current_order_size * (self.fees_maker_percentage/100)
-            
-            # if SL is hit
-            elif((self.stop_loss != 0) and (self.r_sl_hit_index != None)):
-                # taker SL long
-                if(self.r_current_trade_long and (self.r_low <= self.r_sl_price_long)):
-                    self.r_pnl = ((((1/self.r_open) - (1/self.r_sl_price_long)) * self.current_order_size) * self.r_sl_price_long)
-                    self.r_pnl = self.r_pnl - (self.current_order_size * (self.fees_taker_percentage/100)) - (self.current_order_size * (self.market_fees_slippage_simulation/100))
-                # taker SL short
-                elif(self.r_current_trade_short and (self.r_high >= self.r_sl_price_short)):
-                    self.r_pnl = ((((1/self.r_open) - (1/self.r_sl_price_short)) * (self.current_order_size * -1)) * self.r_sl_price_short)
-                    self.r_pnl = self.r_pnl - (self.current_order_size * (self.fees_taker_percentage/100)) - (self.current_order_size * (self.market_fees_slippage_simulation/100))
                 
-            # update index variables
+                # if SL is hit
+                elif(self.r_sl_hit_index != None):
+                    # taker SL long
+                    if(self.r_current_trade_long and (self.r_low <= self.r_sl_price_long)):
+                        self.r_pnl = ((((1/self.r_open) - (1/self.r_sl_price_long)) * self.current_order_size) * self.r_sl_price_long)
+                        self.r_pnl = self.r_pnl - (self.current_order_size * (self.fees_taker_percentage/100)) - (self.current_order_size * (self.market_fees_slippage_simulation/100))
+                    # taker SL short
+                    elif(self.r_current_trade_short and (self.r_high >= self.r_sl_price_short)):
+                        self.r_pnl = ((((1/self.r_open) - (1/self.r_sl_price_short)) * (self.current_order_size * -1)) * self.r_sl_price_short)
+                        self.r_pnl = self.r_pnl - (self.current_order_size * (self.fees_taker_percentage/100)) - (self.current_order_size * (self.market_fees_slippage_simulation/100))
+                    
+                
+            # ##############################################
+            # Reset variables
+            # ##############################################
             self.r_sl_hit_index = None
             self.r_tp_hit_index = None
-        
-            # calculate the return
-            self.r_pnl_return = (self.r_pnl / self.current_order_size) * 100
+            self.position = Positions.NoPosition
+            self.current_pnl = 0.
+            
+            # calculate the % return
+            # self.r_pnl_return = (self.r_pnl / self.current_order_size) * 100
         
         # if a trade is currently open, give an iterim reward
         if(self.r_active_trade):
             if(self.r_current_trade_long):
-                interim_reward = ((((1/self.r_open) - (1/self.r_close)) * self.current_order_size) * self.r_close)
+                # (((1 / Futures Entry Price) - (1 / Futures Exit Price)) * Position Size) * Futures Exit Price
+                self.r_pnl = ((((1/self.r_open) - (1/self.r_close)) * self.current_order_size) * self.r_close)
             elif(self.r_current_trade_short):
-                interim_reward = ((((1/self.r_open) - (1/self.r_close)) * (self.current_order_size * -1)) * self.r_close)
+                # (((1 / Futures Entry Price) - (1 / Futures Exit Price)) * (Position Size * -1)) * Futures Exit Price
+                self.r_pnl = ((((1/self.r_open) - (1/self.r_close)) * (self.current_order_size * -1)) * self.r_close)
                 
-            # convert to return
-            interim_return = (interim_reward / self.current_order_size) * 100
-            return self.noise_function(interim_return / 10)
+            self.current_pnl = self.r_pnl
+             
+            return self.fixed_reward #interim_reward_return
         
-        return self.noise_function(self.r_pnl_return)
+        return self.r_pnl
 
 
 
     def calculate_profit(self, action):
         
         self.index += 1
-        current_open = self.prices[self.last_trade_tick]
+        current_open = self.prices[self.current_tick - 1]
         current_low = self.hl['Low'][self.current_tick]
         current_high = self.hl['High'][self.current_tick]
         current_close = self.prices[self.current_tick]
@@ -427,6 +593,7 @@ class CryptoEnvContinuous(TradingEnv):
             
         self.long = True if (action == Actions.Buy.value) else False
         self.short = True if (action == Actions.Sell.value) else False
+        self.skip = True if ((action == Actions.Skip.value)) else False
         self.open_trade_signal = (self.long or self.short) and (self.active_trade == False)
         
         # ########################################################
@@ -434,15 +601,15 @@ class CryptoEnvContinuous(TradingEnv):
         # ########################################################
         
         if(self.open_trade_signal == True):
-            self.open = current_open
+            self.candle_open = current_open
             self.active_trade = True
-            self.high = current_high
-            self.low = current_low
+            self.candle_high = current_high
+            self.candle_low = current_low
             
-            self.tp_price_long = self.open + (self.open * self.take_profit/100)
-            self.tp_price_short = self.open - (self.open * self.take_profit/100)
-            self.sl_price_long = self.open - (self.open * self.stop_loss/100)
-            self.sl_price_short = self.open + (self.open * self.stop_loss/100)
+            self.tp_price_long = self.candle_open + (self.candle_open * self.take_profit/100)
+            self.tp_price_short = self.candle_open - (self.candle_open * self.take_profit/100)
+            self.sl_price_long = self.candle_open - (self.candle_open * self.stop_loss/100)
+            self.sl_price_short = self.candle_open + (self.candle_open * self.stop_loss/100)
             
             if(self.long):
                 self.current_trade_long = True
@@ -458,23 +625,24 @@ class CryptoEnvContinuous(TradingEnv):
         # ############################################################################
         
         if(self.active_trade):
-            self.close = current_close
-            if(current_high > self.high):
-                self.high = current_high
-            if(current_low < self.low):
-                self.low = current_low
+            self.candle_close = current_close
+            if(current_high > self.candle_high):
+                self.candle_high = current_high
+            if(current_low < self.candle_low):
+                self.candle_low = current_low
             
-            # Check if SL or TP are hit, assign current index to self.tp_hit_index or self.sl_hit_index
-            if(self.long and self.sl_hit_index == None):
-                if(current_low <= self.sl_price_long):
-                    self.sl_hit_index = self.index
-                if(current_high >= self.tp_price_long):
-                    self.tp_hit_index = self.index
-            if(self.short and self.sl_hit_index == None):
-                if(current_high >= self.sl_price_short):
-                    self.sl_hit_index = self.index
-                if(current_low <= self.tp_price_short):
-                    self.tp_hit_index = self.index        
+            if(self.enable_sltp):
+                # Check if SL or TP are hit, assign current index to self.tp_hit_index or self.sl_hit_index
+                if(self.long and self.sl_hit_index == None):
+                    if(current_low <= self.sl_price_long):
+                        self.sl_hit_index = self.index
+                    if(current_high >= self.tp_price_long):
+                        self.tp_hit_index = self.index
+                if(self.short and self.sl_hit_index == None):
+                    if(current_high >= self.sl_price_short):
+                        self.sl_hit_index = self.index
+                    if(current_low <= self.tp_price_short):
+                        self.tp_hit_index = self.index        
                     
 
         # ########################################################
@@ -482,9 +650,25 @@ class CryptoEnvContinuous(TradingEnv):
         # If open_trade=True, close trade. Then open next trade
         # ########################################################
         
-        # self.close_trade_signal = (self.active_trade == True) and ((self.current_trade_long and self.short) or (self.current_trade_short and self.long) or (self.tp_hit_index or self.sl_hit_index))
-        self.close_trade_signal = (self.active_trade == True) and (self.tp_hit_index or self.sl_hit_index)
-        
+        if(self.enable_sltp):
+            self.close_trade_signal = (
+                (self.active_trade == True) and
+                (
+                    (self.tp_hit_index != None) or
+                    (self.sl_hit_index != None) or
+                    (self.skip) or
+                    (self.current_tick == self.end_tick)
+                )
+            )
+        else:
+            self.close_trade_signal = (
+                (self.active_trade == True) and
+                (
+                    (self.skip) or
+                    (self.current_tick == self.end_tick)
+                )
+            )
+            
         
         # ########################################################
         # Close trade when signal condition is met
@@ -507,10 +691,10 @@ class CryptoEnvContinuous(TradingEnv):
             # Basic PnL
             if(self.current_trade_long):
                 # (((1 / Futures Entry Price) - (1 / Futures Exit Price)) * Position Size) * Futures Exit Price
-                self.pnl = ((((1/self.open) - (1/self.close)) * order_size) * self.close)
+                self.pnl = ((((1/self.candle_open) - (1/self.candle_close)) * order_size) * self.candle_close)
             elif(self.current_trade_short):
                 # (((1 / Futures Entry Price) - (1 / Futures Exit Price)) * (Position Size * -1)) * Futures Exit Price
-                self.pnl = ((((1/self.open) - (1/self.close)) * (order_size * -1)) * self.close)
+                self.pnl = ((((1/self.candle_open) - (1/self.candle_close)) * (order_size * -1)) * self.candle_close)
 
 
             # Trading Fee = (Open Value X Maker Fee Rate) + (Close Value X Maker Fee Rate)
@@ -538,63 +722,66 @@ class CryptoEnvContinuous(TradingEnv):
             # TP/SL & liquidation PNL
             # ##############################################
 
-            # if TP and SL are both hit at the same candle, flip a probabilistic coin to determine the outcome
-            if((self.take_profit != 0 and self.stop_loss != 0) and (self.sl_hit_index == self.tp_hit_index) and (self.sl_hit_index != None)):
+            if(self.enable_sltp):
+                # if TP and SL are both hit at the same candle, flip a probabilistic coin to determine the outcome
+                if((self.sl_hit_index == self.tp_hit_index) and (self.sl_hit_index != None)):
+                    
+                    # calculate the probability of each outcome based on the TP/SL distance. Example if TP is 0.5% and SL is 0.1% then the probability of TP being hit is 0.833 and SL being hit is 0.167
+                    tp_prob = self.stop_loss / (self.take_profit + self.stop_loss)
+                    sl_prob = self.take_profit / (self.take_profit + self.stop_loss)
+                    
+                    coinflip = np.random.choice([0,1], p=[tp_prob, sl_prob])
+                    # self.coinflips.append(coinflip)
+                    
+                    # Win
+                    if(coinflip == 0):
+                        if(self.current_trade_long and (self.candle_high >= self.tp_price_long)):
+                            self.pnl = ((((1/self.candle_open) - (1/self.tp_price_long)) * order_size) * self.tp_price_long)
+                            self.pnl = self.pnl - order_size * (self.fees_maker_percentage/100)
+                        # maker TP short
+                        if(self.current_trade_short and (self.candle_low <= self.tp_price_short)):
+                            self.pnl = ((((1/self.candle_open) - (1/self.tp_price_short)) * (order_size * -1)) * self.tp_price_short)
+                            self.pnl = self.pnl - order_size * (self.fees_maker_percentage/100)
+                            
+                    # Loss
+                    else:
+                        if(self.current_trade_long and (self.candle_low <= self.sl_price_long)):
+                            self.pnl = ((((1/self.candle_open) - (1/self.sl_price_long)) * order_size) * self.sl_price_long)
+                            self.pnl = self.pnl - (order_size * (self.fees_taker_percentage/100)) - (order_size * (self.fees_maker_percentage/100))
+                        # taker SL short
+                        elif(self.current_trade_short and (self.candle_high >= self.sl_price_short)):
+                            self.pnl = ((((1/self.candle_open) - (1/self.sl_price_short)) * (order_size * -1)) * self.sl_price_short)
+                            self.pnl = self.pnl - (order_size * (self.fees_taker_percentage/100)) - (order_size * (self.fees_maker_percentage/100))
                 
-                # calculate the probability of each outcome based on the TP/SL distance. Example if TP is 0.5% and SL is 0.1% then the probability of TP being hit is 0.833 and SL being hit is 0.167
-                tp_prob = self.stop_loss / (self.take_profit + self.stop_loss)
-                sl_prob = self.take_profit / (self.take_profit + self.stop_loss)
                 
-                coinflip = np.random.choice([0,1], p=[tp_prob, sl_prob])
-                # self.coinflips.append(coinflip)
-                
-                # Win
-                if(coinflip == 0):
-                    if(self.current_trade_long and (self.high >= self.tp_price_long)):
-                        self.pnl = ((((1/self.open) - (1/self.tp_price_long)) * order_size) * self.tp_price_long)
+                # if TP is hit
+                if(self.tp_hit_index != None):
+                    # maker TP long
+                    if(self.current_trade_long and (self.candle_high >= self.tp_price_long)):
+                        self.pnl = ((((1/self.candle_open) - (1/self.tp_price_long)) * order_size) * self.tp_price_long)
                         self.pnl = self.pnl - order_size * (self.fees_maker_percentage/100)
                     # maker TP short
-                    if(self.current_trade_short and (self.low <= self.tp_price_short)):
-                        self.pnl = ((((1/self.open) - (1/self.tp_price_short)) * (order_size * -1)) * self.tp_price_short)
+                    if(self.current_trade_short and (self.candle_low <= self.tp_price_short)):
+                        self.pnl = ((((1/self.candle_open) - (1/self.tp_price_short)) * (order_size * -1)) * self.tp_price_short)
                         self.pnl = self.pnl - order_size * (self.fees_maker_percentage/100)
-                        
-                # Loss
-                else:
-                    if(self.current_trade_long and (self.low <= self.sl_price_long)):
-                        self.pnl = ((((1/self.open) - (1/self.sl_price_long)) * order_size) * self.sl_price_long)
+                
+                # if SL is hit
+                elif(self.sl_hit_index != None):
+                    # taker SL long
+                    if(self.current_trade_long and (self.candle_low <= self.sl_price_long)):
+                        self.pnl = ((((1/self.candle_open) - (1/self.sl_price_long)) * order_size) * self.sl_price_long)
                         self.pnl = self.pnl - (order_size * (self.fees_taker_percentage/100)) - (order_size * (self.fees_maker_percentage/100))
                     # taker SL short
-                    elif(self.current_trade_short and (self.high >= self.sl_price_short)):
-                        self.pnl = ((((1/self.open) - (1/self.sl_price_short)) * (order_size * -1)) * self.sl_price_short)
+                    elif(self.current_trade_short and (self.candle_high >= self.sl_price_short)):
+                        self.pnl = ((((1/self.candle_open) - (1/self.sl_price_short)) * (order_size * -1)) * self.sl_price_short)
                         self.pnl = self.pnl - (order_size * (self.fees_taker_percentage/100)) - (order_size * (self.fees_maker_percentage/100))
-            
-            
-            # if TP is hit
-            elif((self.take_profit != 0) and (self.tp_hit_index != None)):
-                # maker TP long
-                if(self.current_trade_long and (self.high >= self.tp_price_long)):
-                    self.pnl = ((((1/self.open) - (1/self.tp_price_long)) * order_size) * self.tp_price_long)
-                    self.pnl = self.pnl - order_size * (self.fees_maker_percentage/100)
-                # maker TP short
-                if(self.current_trade_short and (self.low <= self.tp_price_short)):
-                    self.pnl = ((((1/self.open) - (1/self.tp_price_short)) * (order_size * -1)) * self.tp_price_short)
-                    self.pnl = self.pnl - order_size * (self.fees_maker_percentage/100)
-            
-            # if SL is hit
-            elif((self.stop_loss != 0) and (self.sl_hit_index != None)):
-                # taker SL long
-                if(self.current_trade_long and (self.low <= self.sl_price_long)):
-                    self.pnl = ((((1/self.open) - (1/self.sl_price_long)) * order_size) * self.sl_price_long)
-                    self.pnl = self.pnl - (order_size * (self.fees_taker_percentage/100)) - (order_size * (self.fees_maker_percentage/100))
-                # taker SL short
-                elif(self.current_trade_short and (self.high >= self.sl_price_short)):
-                    self.pnl = ((((1/self.open) - (1/self.sl_price_short)) * (order_size * -1)) * self.sl_price_short)
-                    self.pnl = self.pnl - (order_size * (self.fees_taker_percentage/100)) - (order_size * (self.fees_maker_percentage/100))
+                    
                 
-            # update index variables
+            # ##############################################
+            # Reset variables
+            # ##############################################
             self.sl_hit_index = None
             self.tp_hit_index = None
 
         return self.pnl
-
 

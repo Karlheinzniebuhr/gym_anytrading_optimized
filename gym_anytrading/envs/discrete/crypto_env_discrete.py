@@ -1,11 +1,11 @@
 import numpy as np
 
-from .noise import NoiseGenerator
+from ..noise import NoiseGenerator
 from .trading_env import TradingEnv, Actions, Positions
-from sklearn.preprocessing import MinMaxScaler
 
 
-class CryptoEnv(TradingEnv):
+
+class CryptoEnvDiscrete(TradingEnv):
 
     def __init__(self, df, window_size, frame_bound, training=False):
         assert len(frame_bound) == 2
