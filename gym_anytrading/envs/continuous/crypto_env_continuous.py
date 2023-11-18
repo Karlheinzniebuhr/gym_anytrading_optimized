@@ -3,6 +3,9 @@ import numba as nb
 import pandas as pd
 import os
 import pickle
+import talib as ta
+import sys
+
 
 from ..noise import NoiseGenerator
 from .trading_env import TradingEnv, Actions, Positions
@@ -101,8 +104,8 @@ class CryptoEnvContinuous(TradingEnv):
 
         # Configuration Parameters
         self.frame_bound = frame_bound
-        self.enable_sltp = True
-        self.stop_loss = 1/100
+        self.enable_sltp = False
+        self.stop_loss = 2/100
         self.take_profit = 2/100
         self.order_size = 1000
         self.current_order_size = 0.0
@@ -137,9 +140,6 @@ class CryptoEnvContinuous(TradingEnv):
         self.r_sl_hit_index = None
         self.r_slippage_fees = 0.0
         
-        self.fixed_penalty = -0.001
-        self.fixed_reward = 0.001
-        self.trade_directions = []
         
         # Current Trade Variables Profit
         self.trade_signal = False
@@ -164,6 +164,11 @@ class CryptoEnvContinuous(TradingEnv):
         self.slippage_fees = 0.0
         
         
+        self.fixed_penalty = -0.00
+        self.fixed_reward = 0.00
+        self.trade_directions = []
+        
+        
         # default noise function for rewards
         self.noise_function = NoiseGenerator().random_normal_noise_reward
         # uncomment this to not use any noise
@@ -184,6 +189,9 @@ class CryptoEnvContinuous(TradingEnv):
         close_prices = np.array(df['Close'])
         labels_list = label_dataframe(open_prices, high_prices, low_prices, close_prices, self.stop_loss, self.take_profit)
         self.labels_df = pd.DataFrame(labels_list, columns=['label', 'iteration_count', 'both_hit'])
+        
+        self.debug_reward = False
+        self.debug_profit = True
         
         super().__init__(df, window_size, random_init_start_tick)
 
@@ -248,16 +256,18 @@ class CryptoEnvContinuous(TradingEnv):
         df = self.df.iloc[start:end, :]
 
         # scale signal features
-        signal_features = df[['High', 'Low', 'Close']].values
+        # signal_features = df[['High', 'Low', 'Close']].values
         
         prices = df['Close'].to_numpy()
-        # diff_prices = np.insert(np.diff(prices), 0, 0)
-        # diff_volume = np.insert(np.diff(df['Volume'].to_numpy()), 0, 0)
+        diff_prices = np.insert(np.diff(prices), 0, 0)
+        diff_high = np.insert(np.diff(df['High'].to_numpy()), 0, 0)
+        diff_low = np.insert(np.diff(df['Low'].to_numpy()), 0, 0)
         
-        # signal_features = np.column_stack((diff_prices, diff_volume))
+        signal_features = np.column_stack((diff_prices, diff_high, diff_low))
 
-        hl = df[['High', 'Low']].reset_index()
-        return prices, hl, signal_features
+        hl = df[['High', 'Low']]
+        date_time = df['Date']
+        return date_time, prices, hl, signal_features
     
     
     
@@ -265,33 +275,102 @@ class CryptoEnvContinuous(TradingEnv):
     #     start = self.frame_bound[0] - self.window_size
     #     end = self.frame_bound[1]
     #     df = self.df.iloc[start:end, :]
+        
+    #     # Calculate moving averages
+    #     ma1000 = df['Close'].rolling(window=1000).mean().fillna(method='bfill').to_numpy()
+    #     ma99 = df['Close'].rolling(window=99).mean().fillna(method='bfill').to_numpy()
+    #     ma25 = df['Close'].rolling(window=25).mean().fillna(method='bfill').to_numpy()
+    #     ma7 = df['Close'].rolling(window=7).mean().fillna(method='bfill').to_numpy()
 
-    #     # signal_features = df[['High', 'Low', 'Close']].values
+    #     # Compute logarithmic returns
+    #     log_return_ma1000 = np.log(ma1000[1:] / ma1000[:-1])
+    #     log_return_ma99 = np.log(ma99[1:] / ma99[:-1])
+    #     log_return_ma25 = np.log(ma25[1:] / ma25[:-1])
+    #     log_return_ma7 = np.log(ma7[1:] / ma7[:-1])
 
-    #     ma1000 = df['Close'].rolling(window=1000).mean().to_numpy()
-    #     ma99 = df['Close'].rolling(window=99).mean().to_numpy()
-    #     ma25 = df['Close'].rolling(window=25).mean().to_numpy()
-    #     ma7 = df['Close'].rolling(window=7).mean().to_numpy()
+    #     # Prepend zeros to maintain the shape
+    #     log_return_ma1000 = np.insert(log_return_ma1000, 0, 0)
+    #     log_return_ma99 = np.insert(log_return_ma99, 0, 0)
+    #     log_return_ma25 = np.insert(log_return_ma25, 0, 0)
+    #     log_return_ma7 = np.insert(log_return_ma7, 0, 0)
 
-    #     diff_1000 = np.insert(np.diff(ma1000), 0, 0)
-    #     diff_ma99 = np.insert(np.diff(ma99), 0, 0)
-    #     diff_ma25 = np.insert(np.diff(ma25), 0, 0)
-    #     diff_ma7 = np.insert(np.diff(ma7), 0, 0)
+    #     # Calculate percentage changes between MAs and the current close price
+    #     percentage_change_ma7_ma25 = ((ma7 - ma25) / ma25)
+    #     percentage_change_ma25_ma99 = ((ma25 - ma99) / ma99)
+    #     percentage_change_ma7_ma99 = ((ma7 - ma99) / ma99)
+    #     percentage_change_ma7_ma1000 = ((ma7 - ma1000) / ma1000)
+    #     percentage_change_ma25_ma1000 = ((ma25 - ma1000) / ma1000)
+    #     percentage_change_ma99_ma1000 = ((ma99 - ma1000) / ma1000)
+    #     percentage_change_close_ma7 = ((df['Close'] - ma7) / ma7)
 
-    #     # Calculate percentage changes between MAs
-    #     percentage_change_ma7_ma25 = ((ma7 - ma25) / ma25) * 10000
-    #     percentage_change_ma25_ma99 = ((ma25 - ma99) / ma99) * 10000
-    #     percentage_change_ma7_ma99 = ((ma7 - ma99) / ma99) * 10000
-
+    #     # Stack features together
     #     signal_features = np.column_stack((
-    #         diff_1000, diff_ma99, diff_ma25, diff_ma7,
+    #         log_return_ma1000, log_return_ma99, log_return_ma25, log_return_ma7,
     #         percentage_change_ma7_ma25,
     #         percentage_change_ma25_ma99,
-    #         percentage_change_ma7_ma99
+    #         percentage_change_ma7_ma99,
+    #         percentage_change_ma7_ma1000,
+    #         percentage_change_ma25_ma1000,
+    #         percentage_change_ma99_ma1000,
+    #         percentage_change_close_ma7  # Added this new feature
     #     ))
-        
+
     #     prices = df['Close'].to_numpy()
-    #     hl = df[['High', 'Low']].reset_index()
+    #     hl = df[['High', 'Low']].reset_index(drop=True)
+
+    #     return prices, hl, signal_features
+
+
+
+    # def process_data(self):
+    #     start = self.frame_bound[0] - self.window_size
+    #     end = self.frame_bound[1]
+    #     df = self.df.iloc[start:end, :]
+
+    #     # New FDMA with Percentage Displacement calculations
+    #     length = 200
+    #     displacement_percent = 0.1  # % displacement
+    #     fib1 = 0.618
+    #     fib2 = 0.382
+    #     fib3 = 0.236
+    #     log_scale = False  # Set according to your needs
+
+    #     src = np.log(df['Close']) if log_scale else df['Close']
+    #     ma = src.rolling(window=length).mean()
+
+    #     # Calculate displacement as a percentage of the MA
+    #     displacement = ma * displacement_percent
+    #     ma_fib1_disp = displacement * fib1
+    #     ma_fib2_disp = displacement * fib2
+    #     ma_fib3_disp = displacement * fib3
+
+    #     ma_fib1_upper = ma + ma_fib1_disp
+    #     ma_fib1_lower = ma - ma_fib1_disp
+    #     ma_fib2_upper = ma + ma_fib2_disp
+    #     ma_fib2_lower = ma - ma_fib2_disp
+    #     ma_fib3_upper = ma + ma_fib3_disp
+    #     ma_fib3_lower = ma - ma_fib3_disp
+
+    #     # Calculate normalized distances for MAs and bands
+    #     normalized_distance_close_ma = (df['Close'] - ma) / ma
+    #     normalized_distance_close_ma_fib1_upper = (df['Close'] - ma_fib1_upper) / ma_fib1_upper
+    #     normalized_distance_close_ma_fib1_lower = (df['Close'] - ma_fib1_lower) / ma_fib1_lower
+    #     normalized_distance_close_ma_fib2_upper = (df['Close'] - ma_fib2_upper) / ma_fib2_upper
+    #     normalized_distance_close_ma_fib2_lower = (df['Close'] - ma_fib2_lower) / ma_fib2_lower
+    #     normalized_distance_close_ma_fib3_upper = (df['Close'] - ma_fib3_upper) / ma_fib3_upper
+    #     normalized_distance_close_ma_fib3_lower = (df['Close'] - ma_fib3_lower) / ma_fib3_lower
+
+    #     # Stack new features together with existing signal features
+    #     signal_features = np.column_stack((normalized_distance_close_ma,
+    #                                     normalized_distance_close_ma_fib1_upper,
+    #                                     normalized_distance_close_ma_fib1_lower,
+    #                                     normalized_distance_close_ma_fib2_upper,
+    #                                     normalized_distance_close_ma_fib2_lower,
+    #                                     normalized_distance_close_ma_fib3_upper,
+    #                                     normalized_distance_close_ma_fib3_lower))
+
+    #     prices = df['Close'].to_numpy()
+    #     hl = df[['High', 'Low']].reset_index(drop=True)
 
     #     return prices, hl, signal_features
 
@@ -339,18 +418,22 @@ class CryptoEnvContinuous(TradingEnv):
 
     def calculate_reward_sim(self, action):
         
+        self.r_pnl = 0.0
+        
         # Lookup if the current action is a win or loss
         # win_loss_skip_label = self.labels_df.iloc[self.last_trade_tick]['label']
         
         if((action == Actions.Skip.value) and (self.r_active_trade == False)):
             # interim_reward = self.calculate_reward_sim_multiverse(action)
+            if(self.debug_reward):
+                print(f'Skip at open: {self.prices[self.current_tick - 1]}, reward: {self.fixed_penalty}')
             return self.fixed_penalty
         
         
         self.r_index += 1
         current_open = self.prices[self.current_tick - 1]
-        current_low = self.hl['Low'][self.current_tick]
-        current_high = self.hl['High'][self.current_tick]
+        current_low = self.hl['Low'].iloc[self.current_tick]
+        current_high = self.hl['High'].iloc[self.current_tick]
         current_close = self.prices[self.current_tick]
 
 
@@ -360,7 +443,7 @@ class CryptoEnvContinuous(TradingEnv):
         
         self.r_long = True if (action == Actions.Buy.value) else False
         self.r_short = True if (action == Actions.Sell.value) else False
-        self.skip = True if ((action == Actions.Skip.value)) else False
+        self.skip = True if (action == Actions.Skip.value) else False
         self.r_trade_signal = (self.r_long or self.r_short) and (self.r_active_trade == False)
 
 
@@ -369,6 +452,15 @@ class CryptoEnvContinuous(TradingEnv):
         # ########################################################
         
         if(self.r_trade_signal == True):
+            
+            # debug code
+            if(self.debug_reward):
+                if(self.r_long):
+                    print(f'Long at open: {current_open}')
+                elif (self.r_short):
+                    print(f'Short at open: {current_open}')
+            
+            
             self.r_open = current_open
             self.r_active_trade = True
             self.r_high = current_high
@@ -432,6 +524,8 @@ class CryptoEnvContinuous(TradingEnv):
                 (
                     (self.r_tp_hit_index != None) or
                     (self.r_sl_hit_index != None) or
+                    (self.r_current_trade_long and self.r_short) or 
+                    (self.r_current_trade_short and self.r_long) or
                     (self.skip)
                 )
             )
@@ -439,6 +533,8 @@ class CryptoEnvContinuous(TradingEnv):
             self.r_close_trade_signal = (
                 (self.r_active_trade == True) and
                 (
+                    (self.r_current_trade_long and self.r_short) or 
+                    (self.r_current_trade_short and self.r_long) or
                     (self.skip)
                 )
             )
@@ -555,7 +651,9 @@ class CryptoEnvContinuous(TradingEnv):
             # ##############################################
             self.r_sl_hit_index = None
             self.r_tp_hit_index = None
-            self.position = Positions.NoPosition
+            self.r_current_trade_long = False
+            self.r_current_trade_short = False
+            self.position = Positions.Long
             self.current_pnl = 0.
             
             # calculate the % return
@@ -563,27 +661,35 @@ class CryptoEnvContinuous(TradingEnv):
         
         # if a trade is currently open, give an iterim reward
         if(self.r_active_trade):
-            if(self.r_current_trade_long):
-                # (((1 / Futures Entry Price) - (1 / Futures Exit Price)) * Position Size) * Futures Exit Price
-                self.r_pnl = ((((1/self.r_open) - (1/self.r_close)) * self.current_order_size) * self.r_close)
-            elif(self.r_current_trade_short):
-                # (((1 / Futures Entry Price) - (1 / Futures Exit Price)) * (Position Size * -1)) * Futures Exit Price
-                self.r_pnl = ((((1/self.r_open) - (1/self.r_close)) * (self.current_order_size * -1)) * self.r_close)
+            # if(self.r_current_trade_long):
+            #     # (((1 / Futures Entry Price) - (1 / Futures Exit Price)) * Position Size) * Futures Exit Price
+            #     self.r_pnl = ((((1/self.r_open) - (1/self.r_close)) * self.current_order_size) * self.r_close)
+            # elif(self.r_current_trade_short):
+            #     # (((1 / Futures Entry Price) - (1 / Futures Exit Price)) * (Position Size * -1)) * Futures Exit Price
+            #     self.r_pnl = ((((1/self.r_open) - (1/self.r_close)) * (self.current_order_size * -1)) * self.r_close)
                 
-            self.current_pnl = self.r_pnl
+            # self.current_pnl = (self.r_pnl / self.current_order_size) * 100
              
+            if(self.debug_reward):
+                print(f'fixed reward at close {current_close}: {self.fixed_reward}')
             return self.fixed_reward #interim_reward_return
         
-        return self.r_pnl
+            
+        if(self.debug_reward):
+            print(f'reward at close {current_close}: {(self.r_pnl / self.current_order_size) * 100}')
+            
+        return (self.r_pnl / self.current_order_size) * 100
 
 
 
     def calculate_profit(self, action):
         
+        self.pnl = 0
+        
         self.index += 1
         current_open = self.prices[self.current_tick - 1]
-        current_low = self.hl['Low'][self.current_tick]
-        current_high = self.hl['High'][self.current_tick]
+        current_low = self.hl['Low'].iloc[self.current_tick]
+        current_high = self.hl['High'].iloc[self.current_tick]
         current_close = self.prices[self.current_tick]
         
         
@@ -593,7 +699,7 @@ class CryptoEnvContinuous(TradingEnv):
             
         self.long = True if (action == Actions.Buy.value) else False
         self.short = True if (action == Actions.Sell.value) else False
-        self.skip = True if ((action == Actions.Skip.value)) else False
+        self.skip = True if (action == Actions.Skip.value) else False
         self.open_trade_signal = (self.long or self.short) and (self.active_trade == False)
         
         # ########################################################
@@ -601,15 +707,23 @@ class CryptoEnvContinuous(TradingEnv):
         # ########################################################
         
         if(self.open_trade_signal == True):
+            
+            # debug code
+            if(self.debug_profit):
+                if(self.r_long):
+                    print(f'Long at open: {current_open}, date_time: {self.date_time.iloc[self.current_tick]}')
+                elif (self.r_short):
+                    print(f'Short at open: {current_open} date_time: {self.date_time.iloc[self.current_tick]}')
+                    
             self.candle_open = current_open
             self.active_trade = True
             self.candle_high = current_high
             self.candle_low = current_low
             
-            self.tp_price_long = self.candle_open + (self.candle_open * self.take_profit/100)
-            self.tp_price_short = self.candle_open - (self.candle_open * self.take_profit/100)
-            self.sl_price_long = self.candle_open - (self.candle_open * self.stop_loss/100)
-            self.sl_price_short = self.candle_open + (self.candle_open * self.stop_loss/100)
+            self.tp_price_long = self.candle_open + (self.candle_open * self.take_profit)
+            self.tp_price_short = self.candle_open - (self.candle_open * self.take_profit)
+            self.sl_price_long = self.candle_open - (self.candle_open * self.stop_loss)
+            self.sl_price_short = self.candle_open + (self.candle_open * self.stop_loss)
             
             if(self.long):
                 self.current_trade_long = True
@@ -650,12 +764,17 @@ class CryptoEnvContinuous(TradingEnv):
         # If open_trade=True, close trade. Then open next trade
         # ########################################################
         
+        # if(self.current_tick == self.end_tick):
+        #     print(f'End of backtest.')
+        
         if(self.enable_sltp):
             self.close_trade_signal = (
                 (self.active_trade == True) and
                 (
                     (self.tp_hit_index != None) or
                     (self.sl_hit_index != None) or
+                    (self.current_trade_long and self.short) or
+                    (self.current_trade_short and self.long) or
                     (self.skip) or
                     (self.current_tick == self.end_tick)
                 )
@@ -664,6 +783,8 @@ class CryptoEnvContinuous(TradingEnv):
             self.close_trade_signal = (
                 (self.active_trade == True) and
                 (
+                    (self.current_trade_long and self.short) or
+                    (self.current_trade_short and self.long) or
                     (self.skip) or
                     (self.current_tick == self.end_tick)
                 )
@@ -782,6 +903,10 @@ class CryptoEnvContinuous(TradingEnv):
             # ##############################################
             self.sl_hit_index = None
             self.tp_hit_index = None
+            self.current_trade_long = False
+            self.current_trade_short = False
 
+        if(self.debug_profit):
+            print(f'profit at close {current_close}: {self.pnl}, date_time: {self.date_time.iloc[self.current_tick]}')
         return self.pnl
 

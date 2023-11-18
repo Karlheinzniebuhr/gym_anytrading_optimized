@@ -110,7 +110,7 @@ class TradingEnv(gym.Env):
         # action, bet_size_index = action
         # bet_size = self.bet_sizes[bet_size_index]
                
-        if self.current_tick >= self.end_tick:
+        if((self.current_tick >= self.end_tick) or (self.total_profit <= 0.0)):
             self.truncated = True
             self.done = True
         else:
