@@ -258,16 +258,15 @@ class CryptoEnvContinuous(TradingEnv):
         # scale signal features
         # signal_features = df[['High', 'Low', 'Close']].values
         
-        prices = df['Close'].to_numpy()
-        diff_prices = np.insert(np.diff(prices), 0, 0)
+        diff_close = np.insert(np.diff(df['Close'].to_numpy()), 0, 0)
         diff_high = np.insert(np.diff(df['High'].to_numpy()), 0, 0)
         diff_low = np.insert(np.diff(df['Low'].to_numpy()), 0, 0)
         
-        signal_features = np.column_stack((diff_prices, diff_high, diff_low))
+        signal_features = np.column_stack((diff_close, diff_high, diff_low))
 
-        hl = df[['High', 'Low']]
+        ohlc = df[['Open', 'High', 'Low', 'Close']].reset_index()
         date_time = df['Date']
-        return date_time, prices, hl, signal_features
+        return date_time, ohlc, signal_features
     
     
     
@@ -426,15 +425,15 @@ class CryptoEnvContinuous(TradingEnv):
         if((action == Actions.Skip.value) and (self.r_active_trade == False)):
             # interim_reward = self.calculate_reward_sim_multiverse(action)
             if(self.debug_reward):
-                print(f'Skip at open: {self.prices[self.current_tick - 1]}, reward: {self.fixed_penalty}')
+                print(f'Skip at open: {self.ohlc["Open"][self.current_tick]}, reward: {self.fixed_penalty}')
             return self.fixed_penalty
         
         
         self.r_index += 1
-        current_open = self.prices[self.current_tick - 1]
-        current_low = self.hl['Low'].iloc[self.current_tick]
-        current_high = self.hl['High'].iloc[self.current_tick]
-        current_close = self.prices[self.current_tick]
+        current_open = self.ohlc["Open"][self.current_tick]
+        current_low = self.ohlc['Low'][self.current_tick]
+        current_high = self.ohlc['High'][self.current_tick]
+        current_close = self.ohlc["Close"][self.current_tick]
 
 
         # ############################################################################
@@ -684,13 +683,16 @@ class CryptoEnvContinuous(TradingEnv):
 
     def calculate_profit(self, action):
         
+        # Variable to track if trades are opened or closed
+        # 0 = no trade opened or closed, 1 means trade opened, 2 means trade closed
+        trade_opened_or_closed = 0
         self.pnl = 0
         
         self.index += 1
-        current_open = self.prices[self.current_tick - 1]
-        current_low = self.hl['Low'].iloc[self.current_tick]
-        current_high = self.hl['High'].iloc[self.current_tick]
-        current_close = self.prices[self.current_tick]
+        current_open = self.ohlc["Open"][self.current_tick]
+        current_low = self.ohlc['Low'][self.current_tick]
+        current_high = self.ohlc['High'][self.current_tick]
+        current_close = self.ohlc["Close"][self.current_tick]
         
         
         # ############################################################################
@@ -708,12 +710,14 @@ class CryptoEnvContinuous(TradingEnv):
         
         if(self.open_trade_signal == True):
             
+            trade_opened_or_closed = 1
+            
             # debug code
             if(self.debug_profit):
                 if(self.r_long):
-                    print(f'Long at open: {current_open}, date_time: {self.date_time.iloc[self.current_tick]}')
+                    print(f'{self.date_time.iloc[self.current_tick]} Long at open: {current_open}')
                 elif (self.r_short):
-                    print(f'Short at open: {current_open} date_time: {self.date_time.iloc[self.current_tick]}')
+                    print(f'{self.date_time.iloc[self.current_tick]} Short at open: {current_open}')
                     
             self.candle_open = current_open
             self.active_trade = True
@@ -796,6 +800,8 @@ class CryptoEnvContinuous(TradingEnv):
         # ########################################################
             
         if(self.active_trade and self.close_trade_signal):
+            
+            trade_opened_or_closed = 2
             
             # reset variables
             self.open_trade_signal = False
@@ -907,6 +913,6 @@ class CryptoEnvContinuous(TradingEnv):
             self.current_trade_short = False
 
         if(self.debug_profit):
-            print(f'profit at close {current_close}: {self.pnl}, date_time: {self.date_time.iloc[self.current_tick]}')
-        return self.pnl
+            print(f'{self.date_time.iloc[self.current_tick]} Profit at close {current_close}: {self.pnl}')
+        return self.pnl, trade_opened_or_closed
 

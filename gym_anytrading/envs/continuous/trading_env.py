@@ -39,7 +39,7 @@ class TradingEnv(gym.Env):
         self.max_ma_size = 200  # Maximum size for moving averages
 
         # Processing input data
-        self.date_time, self.prices, self.hl, self.signal_features = self.process_data()
+        self.date_time, self.ohlc, self.signal_features = self.process_data()
 
         # Action and observation spaces
         self.action_space = spaces.Discrete(len(Actions))
@@ -48,7 +48,7 @@ class TradingEnv(gym.Env):
 
         # Episode control variables
         self.start_tick = self.window_size + self.max_ma_size
-        self.end_tick = len(self.prices) - 1
+        self.end_tick = len(self.ohlc) - 1
         self.current_tick = self.start_tick
         self.last_trade_tick = self.current_tick - 1
         self.done = False
@@ -85,7 +85,7 @@ class TradingEnv(gym.Env):
         # Decide start tick based on random initialization setting
         if self.random_init_start_tick:
             # Sample random start tick between window_size and end_tick
-            self.start_tick = random.randint(self.window_size, self.end_tick - self.window_size)
+            self.start_tick = random.randint(self.window_size + self.max_ma_size, self.end_tick - self.window_size)
         else:
             self.start_tick = self.window_size + self.max_ma_size
 
@@ -104,7 +104,7 @@ class TradingEnv(gym.Env):
         self.history = {}
 
         # Optional: Re-generate new observations
-        # self.prices, self.hl, self.signal_features = self.process_data()
+        # self.date_time, self.ohlc, self.signal_features = self.process_data()
 
         # Return initial observation and history
         return self.get_observation(), self.history
@@ -131,7 +131,7 @@ class TradingEnv(gym.Env):
             print(self.debug_rewards)
             assert False
         
-        profit = self.calculate_profit(action)
+        profit, trade_opened_or_closed = self.calculate_profit(action)
         self.total_profit += profit
         
         self.debug_profits.append(profit)
@@ -155,9 +155,14 @@ class TradingEnv(gym.Env):
         
         info = dict(
             date_time = self.date_time.iloc[self.current_tick],
+            open = self.ohlc.iloc[self.current_tick]['Open'],
+            high = self.ohlc.iloc[self.current_tick]['High'],
+            low = self.ohlc.iloc[self.current_tick]['Low'],
+            close = self.ohlc.iloc[self.current_tick]['Close'],
             total_reward = self.total_reward,
             total_profit = self.total_profit,
-            position = self.position.value
+            position = self.position.value,
+            trade_opened_or_closed = trade_opened_or_closed,
         )
         self.update_history(info)
 
@@ -192,12 +197,12 @@ class TradingEnv(gym.Env):
             elif position == Positions.Long:
                 color = 'green'
             if color:
-                plt.scatter(tick, self.prices[tick], color=color)
+                plt.scatter(tick, self.ohlc['Close'][tick], color=color)
 
         if self.first_rendering:
             self.first_rendering = False
             plt.cla()
-            plt.plot(self.prices)
+            plt.plot(self.ohlc['Close'])
             start_position = self.history['position'][self.start_tick]
             plot_position(start_position, self.start_tick)
 
@@ -219,15 +224,20 @@ class TradingEnv(gym.Env):
 
         position_history = self.history['position']
         date_time_history = self.history['date_time']
+        trade_history = self.history['trade_opened_or_closed']
+        open_history = self.history['open']
+        high_history = self.history['high']
+        low_history = self.history['low']
+        close_history = self.history['close']
         window_ticks = np.arange(len(position_history))
         fig = go.Figure()
 
         # Candlestick chart
         fig.add_trace(go.Candlestick(x=window_ticks,
-                                    open=self.df['Open'],
-                                    high=self.df['High'],
-                                    low=self.df['Low'],
-                                    close=self.df['Close'],
+                                    open=open_history,
+                                    high=high_history,
+                                    low=low_history,
+                                    close=close_history,
                                     name='Candlesticks'))
 
         # Accumulate position markers and count positions
@@ -236,21 +246,42 @@ class TradingEnv(gym.Env):
         num_short = 0
         num_long = 0
         num_no_position = 0
-
-        for i, position in enumerate(position_history):
+        
+        open_trade_index = None
+        open_trade_position = None
+        
+        for i, (position, trade_status) in enumerate(zip(position_history, trade_history)):
             date_time = date_time_history[i] if i < len(date_time_history) else "Unknown"
             if position == Positions.Short.value:
                 short_x.append(window_ticks[i])
-                short_y.append(self.df.iloc[i]['Open'])
+                short_y.append(open_history[i])
                 short_text.append(date_time)
                 num_short += 1
             elif position == Positions.Long.value:
                 long_x.append(window_ticks[i])
-                long_y.append(self.df.iloc[i]['Open'])
+                long_y.append(open_history[i])
                 long_text.append(date_time)
                 num_long += 1
             elif position == Positions.NoPosition.value:
                 num_no_position += 1
+                
+            # Check trade status and draw trade lines
+            if trade_status == 1:  # Trade opened
+                open_trade_index = window_ticks[i]
+                open_trade_position = position
+            elif trade_status == 2 and open_trade_index is not None:  # Trade closed
+                close_trade_index = window_ticks[i]
+                
+                
+                # Determine the color based on the position
+                line_color = "green" if open_trade_position == Positions.Long.value else "red"
+
+                fig.add_shape(type="line",
+                              x0=open_trade_index, y0=open_history[open_trade_index], 
+                              x1=close_trade_index, y1=open_history[close_trade_index],
+                              line=dict(color=line_color, width=2))
+                open_trade_index = None
+
 
         # Add position marker traces with hover text
         fig.add_trace(go.Scatter(x=short_x, y=short_y, mode='markers', marker=dict(color='red', size=10), name='Short',
